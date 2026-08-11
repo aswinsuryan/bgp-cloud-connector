@@ -11,6 +11,7 @@ The operator is **cloud platform aware**. When platform configuration is provide
 - [Custom Resource Definitions](#custom-resource-definitions)
 - [Controller Reconciliation](#controller-reconciliation)
 - [Development](#development)
+- [Deploy via OLM bundle](#deploy-via-olm-bundle)
 - [Automated Testing](#automated-testing)
 - [KubeVirt VM Testing](#kubevirt-vm-testing)
 
@@ -793,6 +794,28 @@ oc get routeadvertisements
 oc delete cudnbgprouting --all
 oc delete cudnbgpconfig cluster
 make undeploy
+```
+
+---
+
+## Deploy via OLM bundle
+
+Use this workflow to test the operator as it would be installed from OperatorHub, using a bundle image.
+This requires an external image registry (e.g. `quay.io`) that the cluster can pull from, and a kubeconfig pointing at the target cluster.
+
+```bash
+oc create ns openshift-cudn-bgp-routing
+make image-build image-push bundle-build bundle-push bundle-run \
+  IMG=<registry>/<repository>/bgp-cloud-connector:v<x.y.z> \
+  BUNDLE_IMG=<registry>/<repository>/bgp-cloud-connector-bundle:v<x.y.z>
+```
+
+To remove the operator and all OLM resources it created:
+
+> **Note:** Delete all CRs before, and wait for them to be fully removed to ensure any external resources managed by the operator are cleaned up.
+
+```bash
+make bundle-clean
 ```
 
 ---

@@ -315,6 +315,18 @@ bundle-build: bundle ## Build the bundle image.
 bundle-push: ## Push the bundle image.
 	$(CONTAINER_TOOL) push $(BUNDLE_IMG)
 
+BUNDLE_NAMESPACE ?= openshift-cudn-bgp-routing
+BUNDLE_RUN_FLAGS ?= --namespace=$(BUNDLE_NAMESPACE) --install-mode=OwnNamespace
+BUNDLE_CLEANUP_FLAGS ?= --namespace=$(BUNDLE_NAMESPACE)
+
+.PHONY: bundle-run
+bundle-run: operator-sdk ## Deploy the operator from the bundle image using operator-sdk run bundle.
+	$(OPERATOR_SDK) run bundle $(BUNDLE_IMG) $(BUNDLE_RUN_FLAGS)
+
+.PHONY: bundle-clean
+bundle-clean: operator-sdk ## Remove the operator deployed via bundle-run.
+	$(OPERATOR_SDK) cleanup bgp-cloud-connector $(BUNDLE_CLEANUP_FLAGS)
+
 .PHONY: opm
 OPM = $(LOCALBIN)/opm
 opm: ## Download opm locally if necessary.
