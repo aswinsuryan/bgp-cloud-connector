@@ -45,6 +45,7 @@ import (
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
+	gcpplatform "github.com/openshift/bgp-cloud-connector/internal/platform/gcp"
 )
 
 // +kubebuilder:rbac:groups=networking.openshift.io,resources=cudnbgpconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -261,6 +262,8 @@ func defaultPlatformBuilder(ctx context.Context, c client.Client, config *networ
 	switch config.Spec.Platform {
 	case networkingv1alpha1.PlatformAWS:
 		return buildAWSPlatform(ctx, c, config)
+	case networkingv1alpha1.PlatformGCP:
+		return buildGCPPlatform(ctx, c, config)
 	default:
 		return nil, fmt.Errorf("no platform implementation for %q", config.Spec.Platform)
 	}
@@ -283,6 +286,29 @@ func buildAWSPlatform(ctx context.Context, c client.Client, config *networkingv1
 	}
 
 	return awsplatform.New(ctx, cfg)
+}
+
+func buildGCPPlatform(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+	gcpSpec := config.Spec.GCP
+
+	clusterID, err := getInfrastructureName(ctx, c)
+	if err != nil {
+		return nil, fmt.Errorf("reading cluster infrastructure name: %w", err)
+	}
+
+	cfg := gcpplatform.Config{
+		Project:         gcpSpec.Project,
+		Region:          gcpSpec.Region,
+		CloudRouterName: gcpSpec.CloudRouterName,
+		NCCHubName:      gcpSpec.NCC.HubName,
+		NCCSpokePrefix:  gcpSpec.NCC.SpokePrefix,
+		SiteToSite:      gcpSpec.NCC.SiteToSiteDataTransfer,
+		NestedVirt:      gcpSpec.EnableNestedVirtualization == nil || *gcpSpec.EnableNestedVirtualization,
+		LocalASN:        config.Spec.BGP.LocalASN,
+		ClusterID:       clusterID,
+	}
+
+	return gcpplatform.New(ctx, cfg)
 }
 
 func getInfrastructureName(ctx context.Context, c client.Client) (string, error) {
