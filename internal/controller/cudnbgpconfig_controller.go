@@ -142,50 +142,50 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ObservedGeneration: config.Generation,
 	})
 
-	// Build AWS platform once if configured (used in Phases 3 and 5)
-	var awsPlatform platform.CloudPlatform
+	// Build the cloud platform once if configured (used in Phases 3 and 5)
+	var cloudPlatform platform.CloudPlatform
 	var discoveryResult *platform.DiscoveryResult
-	if config.Spec.AWS != nil {
+	if config.Spec.Platform != networkingv1alpha1.PlatformManual {
 		buildPlatform := r.PlatformBuilder
 		if buildPlatform == nil {
 			buildPlatform = defaultPlatformBuilder
 		}
 		p, err := buildPlatform(ctx, r.Client, config)
 		if err != nil {
-			var credErr *awsplatform.CredentialError
+			var credErr *platform.CredentialError
 			if errors.As(err, &credErr) {
-				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
-					"AWSCredentialsInvalid", credErr.Error())
+				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
+					"CloudCredentialsInvalid", credErr.Error())
 			}
-			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
-				"AWSDiscoveryFailed", fmt.Sprintf("failed to build AWS platform: %v", err))
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
+				"CloudDiscoveryFailed", fmt.Sprintf("failed to build the cloud platform: %v", err))
 		}
-		awsPlatform = p
+		cloudPlatform = p
 
-		// Phase 3: Discover Route Server Infrastructure
-		log.Info("Phase 3: discovering Route Server endpoints")
-		discoveryResult, err = awsPlatform.DiscoverEndpoints(ctx)
+		// Phase 3: Discover the cloud's BGP endpoints
+		log.Info("Phase 3: discovering cloud BGP endpoints")
+		discoveryResult, err = cloudPlatform.DiscoverEndpoints(ctx)
 		if err != nil {
-			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSEndpointsDiscovered,
-				"AWSDiscoveryFailed", fmt.Sprintf("failed to discover Route Server endpoints: %v", err))
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
+				"CloudDiscoveryFailed", fmt.Sprintf("failed to discover cloud BGP endpoints: %v", err))
 		}
-		config.Status.AWS = discoveryResultToStatus(discoveryResult)
+		config.Status.PeerGroups = peerGroupsToStatus(discoveryResult.PeerGroups)
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
-			Type:               networkingv1alpha1.ConditionAWSEndpointsDiscovered,
+			Type:               networkingv1alpha1.ConditionCloudEndpointsDiscovered,
 			Status:             metav1.ConditionTrue,
 			Reason:             "Discovered",
-			Message:            fmt.Sprintf("Discovered %d Route Server(s) with endpoints across %d AZ(s)", len(discoveryResult.RouteServers), len(discoveryResult.NeighborsByAZ)),
+			Message:            fmt.Sprintf("Discovered %d peer group(s)", len(discoveryResult.PeerGroups)),
 			ObservedGeneration: config.Generation,
 		})
 	}
 
-	// Phase 4: Apply FRR Configuration per AZ
+	// Phase 4: Apply FRR Configuration per peer group
 	log.Info("Phase 4: applying FRR configurations")
 	var frrCount int
-	if config.Spec.AWS != nil && discoveryResult != nil {
-		frrCount, err = EnsureFRRConfigurationsFromDiscovery(ctx, r.Client, config, discoveryResult)
+	if discoveryResult != nil {
+		frrCount, err = EnsureFRRConfigurationsFromGroups(ctx, r.Client, config, discoveryResult.PeerGroups)
 	} else {
-		frrCount = len(config.Spec.BGP.AvailabilityZones)
+		frrCount = len(config.Spec.BGP.PeerGroups)
 		err = EnsureFRRConfigurations(ctx, r.Client, config)
 	}
 	if err != nil {
@@ -200,23 +200,23 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ObservedGeneration: config.Generation,
 	})
 
-	// Phase 5: Reconcile AWS Resources (if configured)
-	if awsPlatform != nil {
-		log.Info("Phase 5: reconciling AWS resources")
+	// Phase 5: Reconcile cloud resources (if configured)
+	if cloudPlatform != nil {
+		log.Info("Phase 5: reconciling cloud resources")
 		nodes, err := r.listRouterNodes(ctx, config)
 		if err != nil {
-			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSResourcesReconciled,
-				"AWSReconcileFailed", fmt.Sprintf("failed to list router nodes: %v", err))
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudResourcesReconciled,
+				"CloudReconcileFailed", fmt.Sprintf("failed to list router nodes: %v", err))
 		}
-		if err := awsPlatform.ReconcileNodes(ctx, nodes); err != nil {
-			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionAWSResourcesReconciled,
-				"AWSReconcileFailed", fmt.Sprintf("failed to reconcile AWS resources: %v", err))
+		if err := cloudPlatform.ReconcileNodes(ctx, nodes); err != nil {
+			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudResourcesReconciled,
+				"CloudReconcileFailed", fmt.Sprintf("failed to reconcile cloud resources: %v", err))
 		}
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
-			Type:               networkingv1alpha1.ConditionAWSResourcesReconciled,
+			Type:               networkingv1alpha1.ConditionCloudResourcesReconciled,
 			Status:             metav1.ConditionTrue,
 			Reason:             "Reconciled",
-			Message:            "Route Server peers and source/dest check reconciled",
+			Message:            "Cloud BGP peerings and router node settings reconciled",
 			ObservedGeneration: config.Generation,
 		})
 	}
@@ -231,26 +231,42 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-func discoveryResultToStatus(dr *platform.DiscoveryResult) *networkingv1alpha1.AWSStatus {
-	status := &networkingv1alpha1.AWSStatus{}
-	for _, rs := range dr.RouteServers {
-		drs := networkingv1alpha1.DiscoveredRouteServer{
-			RouteServerID: rs.RouteServerID,
-			RemoteASN:     rs.RemoteASN,
+// peerGroupsToStatus reports the peering plan, which is what FRR was told to
+// peer with and therefore the thing worth reading.
+func peerGroupsToStatus(groups []platform.PeerGroup) []networkingv1alpha1.PeerGroupStatus {
+	if len(groups) == 0 {
+		return nil
+	}
+	out := make([]networkingv1alpha1.PeerGroupStatus, 0, len(groups))
+	for _, g := range groups {
+		pg := networkingv1alpha1.PeerGroupStatus{
+			Key:          g.Key,
+			NodeSelector: g.NodeSelector,
 		}
-		for _, ep := range rs.Endpoints {
-			drs.Endpoints = append(drs.Endpoints, networkingv1alpha1.DiscoveredEndpoint{
-				EndpointID:       ep.EndpointID,
-				AvailabilityZone: ep.AZ,
-				Address:          ep.Address,
+		for _, n := range g.Neighbors {
+			pg.Neighbors = append(pg.Neighbors, networkingv1alpha1.BGPNeighbor{
+				Address:   n.Address,
+				RemoteASN: n.ASN,
 			})
 		}
-		status.RouteServers = append(status.RouteServers, drs)
+		out = append(out, pg)
 	}
-	return status
+	return out
 }
 
+// defaultPlatformBuilder constructs the cloud platform named by spec.platform.
+// PlatformManual never reaches here: the controller skips platform
+// construction entirely for it.
 func defaultPlatformBuilder(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+	switch config.Spec.Platform {
+	case networkingv1alpha1.PlatformAWS:
+		return buildAWSPlatform(ctx, c, config)
+	default:
+		return nil, fmt.Errorf("no platform implementation for %q", config.Spec.Platform)
+	}
+}
+
+func buildAWSPlatform(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
 	awsSpec := config.Spec.AWS
 
 	clusterID, err := getInfrastructureName(ctx, c)
@@ -299,7 +315,7 @@ func (r *CUDNBgpConfigReconciler) listRouterNodes(ctx context.Context, config *n
 		rn := platform.RouterNode{
 			Name:       node.Name,
 			ProviderID: node.Spec.ProviderID,
-			AZ:         node.Labels["topology.kubernetes.io/zone"],
+			Zone:       node.Labels["topology.kubernetes.io/zone"],
 		}
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == corev1.NodeInternalIP {
@@ -307,9 +323,9 @@ func (r *CUDNBgpConfigReconciler) listRouterNodes(ctx context.Context, config *n
 				break
 			}
 		}
-		if rn.PrivateIP == "" || rn.AZ == "" || rn.ProviderID == "" {
+		if rn.PrivateIP == "" || rn.Zone == "" || rn.ProviderID == "" {
 			logf.FromContext(ctx).Info("skipping node with incomplete info",
-				"node", node.Name, "ip", rn.PrivateIP, "az", rn.AZ, "providerID", rn.ProviderID)
+				"node", node.Name, "ip", rn.PrivateIP, "zone", rn.Zone, "providerID", rn.ProviderID)
 			continue
 		}
 		nodes = append(nodes, rn)
@@ -334,19 +350,19 @@ func (r *CUDNBgpConfigReconciler) reconcileDelete(ctx context.Context, config *n
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	if config.Spec.AWS != nil {
-		log.Info("cleaning up AWS resources")
+	if config.Spec.Platform != networkingv1alpha1.PlatformManual {
+		log.Info("cleaning up cloud resources")
 		buildPlatform := r.PlatformBuilder
 		if buildPlatform == nil {
 			buildPlatform = defaultPlatformBuilder
 		}
 		p, err := buildPlatform(ctx, r.Client, config)
 		if err != nil {
-			log.Error(err, "unable to build AWS platform for cleanup, skipping cloud resource cleanup")
+			log.Error(err, "unable to build the cloud platform for cleanup, skipping cloud resource cleanup")
 		} else if _, err := p.DiscoverEndpoints(ctx); err != nil {
 			log.Error(err, "unable to discover endpoints for cleanup, skipping cloud resource cleanup")
 		} else if err := p.Cleanup(ctx); err != nil {
-			return ctrl.Result{}, fmt.Errorf("cleaning up AWS resources: %w", err)
+			return ctrl.Result{}, fmt.Errorf("cleaning up cloud resources: %w", err)
 		}
 	}
 

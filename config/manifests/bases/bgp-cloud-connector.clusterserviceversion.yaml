@@ -9,10 +9,11 @@ metadata:
           "kind": "CUDNBgpConfig",
           "metadata": {"name": "cluster"},
           "spec": {
+            "platform": "Manual",
             "bgp": {
               "localASN": 65001,
               "livenessDetection": "bgp-keepalive",
-              "availabilityZones": [
+              "peerGroups": [
                 {
                   "nodeSelector": {"bgp_router_subnet": "1"},
                   "neighbors": [

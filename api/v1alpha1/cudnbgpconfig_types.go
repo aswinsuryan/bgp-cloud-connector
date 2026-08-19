@@ -38,12 +38,35 @@ const (
 	PhaseDegraded    PhaseType = "Degraded"
 )
 
+// PlatformType selects which cloud the operator reconciles BGP peering
+// against. It is the discriminator for the cloud-specific block in the spec.
+// +kubebuilder:validation:Enum=AWS;Manual
+type PlatformType string
+
+// AllPlatforms is every value the enum above accepts. The dispatch test walks
+// it, so a value added to the marker and forgotten here, or added to both and
+// never given a builder, fails rather than surfacing as "no platform
+// implementation" at runtime on a live cluster.
+var AllPlatforms = []PlatformType{PlatformAWS, PlatformManual}
+
 const (
-	ConditionNetworkOperatorPatched  = "NetworkOperatorPatched"
-	ConditionFRRNamespaceReady       = "FRRNamespaceReady"
-	ConditionAWSEndpointsDiscovered  = "AWSEndpointsDiscovered"
-	ConditionFRRConfigurationApplied = "FRRConfigurationApplied"
-	ConditionAWSResourcesReconciled  = "AWSResourcesReconciled"
+	// PlatformAWS discovers BGP neighbours from VPC Route Server endpoints and
+	// reconciles Route Server peers and source/dest check. Requires spec.aws.
+	PlatformAWS PlatformType = "AWS"
+	// PlatformManual performs no cloud reconciliation. BGP neighbours are
+	// taken from spec.bgp.peerGroups.
+	PlatformManual PlatformType = "Manual"
+)
+
+const (
+	ConditionNetworkOperatorPatched = "NetworkOperatorPatched"
+	ConditionFRRNamespaceReady      = "FRRNamespaceReady"
+	// The discovery and reconcile conditions are the operator's own rather
+	// than any one provider's: every cloud reports both, and only the API
+	// calls beneath them differ.
+	ConditionCloudEndpointsDiscovered = "CloudEndpointsDiscovered"
+	ConditionFRRConfigurationApplied  = "FRRConfigurationApplied"
+	ConditionCloudResourcesReconciled = "CloudResourcesReconciled"
 )
 
 type BGPNeighbor struct {
@@ -53,32 +76,46 @@ type BGPNeighbor struct {
 	RemoteASN int64 `json:"remoteASN"`
 }
 
-type AvailabilityZone struct {
+// PeerGroup is a set of router nodes sharing a neighbour set, and becomes one
+// FRRConfiguration.
+//
+// How many groups a cluster has is a property of its cloud. Endpoints that are
+// per subnet give one group per availability zone, because a node peers with
+// the ones in its own; endpoints presented once for a region give a single
+// group covering every router node.
+type PeerGroup struct {
 	NodeSelector map[string]string `json:"nodeSelector"`
 	// +kubebuilder:validation:MinItems=1
 	Neighbors []BGPNeighbor `json:"neighbors"`
 }
 
+// AWSConfig names the VPC Route Servers to discover. A VPC can hold several
+// and their endpoints are per subnet, which is why AWS is the cloud that
+// produces more than one peer group.
 type AWSConfig struct {
 	Region string `json:"region"`
 	// +kubebuilder:validation:MinItems=1
 	RouteServerIDs []string `json:"routeServerIDs"`
 }
 
-type DiscoveredEndpoint struct {
-	EndpointID       string `json:"endpointID"`
-	AvailabilityZone string `json:"availabilityZone"`
-	Address          string `json:"address"`
-}
-
-type DiscoveredRouteServer struct {
-	RouteServerID string               `json:"routeServerID"`
-	RemoteASN     int64                `json:"remoteASN"`
-	Endpoints     []DiscoveredEndpoint `json:"endpoints,omitempty"`
-}
-
-type AWSStatus struct {
-	RouteServers []DiscoveredRouteServer `json:"routeServers,omitempty"`
+// PeerGroupStatus reports one group of the peering plan the operator
+// discovered, and therefore what FRR was configured to peer with.
+//
+// Every cloud populates it, which is the bar a shared status block has to
+// clear: one shaped around a single provider's resources leaves every other
+// cloud reconciling peerings and reporting nothing about them, and a sibling
+// block per cloud is worse.
+type PeerGroupStatus struct {
+	// Key names the group in cloud-meaningful terms: an availability zone on
+	// AWS, and whatever names the single regional endpoint elsewhere.
+	Key string `json:"key"`
+	// NodeSelector narrows spec.routerNodeSelector to this group. Empty means
+	// every router node.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// Neighbors are the addresses the router nodes in this group peer with.
+	// +optional
+	Neighbors []BGPNeighbor `json:"neighbors,omitempty"`
 }
 
 type BGPConfig struct {
@@ -88,22 +125,39 @@ type BGPConfig struct {
 	// +kubebuilder:default="bgp-keepalive"
 	LivenessDetection LivenessDetectionType `json:"livenessDetection,omitempty"`
 	// +optional
-	AvailabilityZones []AvailabilityZone `json:"availabilityZones,omitempty"`
+	PeerGroups []PeerGroup `json:"peerGroups,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!(has(self.aws) && has(self.bgp.availabilityZones) && size(self.bgp.availabilityZones) > 0)",message="spec.aws and spec.bgp.availabilityZones are mutually exclusive"
-// +kubebuilder:validation:XValidation:rule="has(self.aws) || (has(self.bgp.availabilityZones) && size(self.bgp.availabilityZones) > 0)",message="spec.bgp.availabilityZones is required when spec.aws is not configured"
+// The cloud block and the platform have to agree in both directions: naming a
+// platform without its block leaves the operator nothing to work from, and a
+// block without its platform is configuration that will never be read. Saying
+// it in CEL means the API server refuses it, rather than the operator
+// discovering it at reconcile and reporting Degraded.
+//
+// peerGroups is the counterpart for Manual, which has no cloud to discover
+// from and so must declare its neighbours, and must not declare them on any
+// other platform, where they would silently lose to what was discovered.
+// +kubebuilder:validation:XValidation:rule="(self.platform == 'AWS') == has(self.aws)",message="spec.aws must be set when spec.platform is AWS, and must be absent otherwise"
+// +kubebuilder:validation:XValidation:rule="self.platform != 'Manual' || (has(self.bgp.peerGroups) && size(self.bgp.peerGroups) > 0)",message="spec.bgp.peerGroups is required when spec.platform is Manual"
+// +kubebuilder:validation:XValidation:rule="self.platform == 'Manual' || !has(self.bgp.peerGroups) || size(self.bgp.peerGroups) == 0",message="spec.bgp.peerGroups may only be set when spec.platform is Manual"
 type CUDNBgpConfigSpec struct {
+	Platform           PlatformType      `json:"platform"`
 	BGP                BGPConfig         `json:"bgp"`
 	RouterNodeSelector map[string]string `json:"routerNodeSelector"`
-	AWS                *AWSConfig        `json:"aws,omitempty"`
+	// +optional
+	AWS *AWSConfig `json:"aws,omitempty"`
 }
 
 type CUDNBgpConfigStatus struct {
 	Phase              PhaseType          `json:"phase,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	AWS                *AWSStatus         `json:"aws,omitempty"`
+	// PeerGroups is the discovered peering plan: what the operator found in
+	// the cloud and rendered into FRRConfigurations. Empty under
+	// platform: Manual, where the plan is declared in spec.bgp.peerGroups
+	// rather than discovered.
+	// +optional
+	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
 }
 
 // +kubebuilder:object:root=true

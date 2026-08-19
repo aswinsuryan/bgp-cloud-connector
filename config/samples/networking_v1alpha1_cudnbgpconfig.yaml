@@ -3,6 +3,7 @@ kind: CUDNBgpConfig
 metadata:
   name: cluster
 spec:
+  platform: AWS
   bgp:
     localASN: 65001                  # terraform output rosa_bgp_asn
     livenessDetection: bgp-keepalive # bfd | bgp-keepalive (default)
@@ -11,19 +12,20 @@ spec:
     bgp_router: "true"
 
   # --- AWS auto-discovery mode ---
-  # When spec.aws is set, the operator discovers Route Server endpoints,
-  # neighbor IPs, and remote ASN automatically. Do NOT set
-  # spec.bgp.availabilityZones in this mode.
+  # Under platform: AWS the operator discovers Route Server endpoints,
+  # neighbor IPs, and remote ASN automatically. spec.bgp.peerGroups is
+  # rejected in this mode.
   aws:
     region: us-east-1                # terraform output aws_region
     routeServerIDs:                  # terraform output vpc1_route_server_ids
       - rs-0abc123456789abcd
 
   # --- Without cloud integration ---
-  # When spec.aws is absent, specify neighbors explicitly.
+  # Change platform above to Manual, drop the spec.aws block, and replace
+  # the bgp block above with this one, which names the neighbours itself.
   # bgp:
   #   localASN: 65001
-  #   availabilityZones:
+  #   peerGroups:
   #     - nodeSelector:
   #         topology.kubernetes.io/zone: us-east-1a
   #         bgp_router_subnet: "1"

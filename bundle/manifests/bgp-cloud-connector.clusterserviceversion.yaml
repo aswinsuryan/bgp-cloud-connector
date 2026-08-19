@@ -21,6 +21,7 @@ metadata:
               "livenessDetection": "bgp-keepalive",
               "localASN": 65001
             },
+            "platform": "AWS",
             "routerNodeSelector": {
               "bgp_router": "true"
             }

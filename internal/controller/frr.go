@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -62,63 +61,49 @@ func IsFRRReady(ctx context.Context, c client.Client) (bool, error) {
 }
 
 func EnsureFRRConfigurations(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) error {
-	expected := make(map[string]bool, len(config.Spec.BGP.AvailabilityZones))
-	for i, az := range config.Spec.BGP.AvailabilityZones {
-		name := fmt.Sprintf("%s%d", FRRConfigNamePrefix, i+1)
-		expected[name] = true
-		if err := ensureSingleFRRConfiguration(ctx, c, config, az, name); err != nil {
-			return fmt.Errorf("AZ %d: %w", i+1, err)
-		}
-	}
-
-	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.List(ctx, list,
-		client.InNamespace(FRRNamespace),
-		client.MatchingLabels{LabelManagedBy: LabelManagedByVal},
-	); err != nil {
-		return err
-	}
-	for i := range list.Items {
-		if !expected[list.Items[i].GetName()] {
-			if err := c.Delete(ctx, &list.Items[i]); err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("pruning stale %s: %w", list.Items[i].GetName(), err)
-			}
-		}
-	}
-	return nil
+	_, err := EnsureFRRConfigurationsFromGroups(ctx, c, config, peerGroupsFromSpec(config))
+	return err
 }
 
-func EnsureFRRConfigurationsFromDiscovery(
+// peerGroupsFromSpec turns declared peer groups into the same shape a cloud
+// discovers, so both paths render through one code path and cannot drift.
+//
+// The key is the group's position, which is what names the object it becomes.
+func peerGroupsFromSpec(config *networkingv1alpha1.CUDNBgpConfig) []platform.PeerGroup {
+	groups := make([]platform.PeerGroup, 0, len(config.Spec.BGP.PeerGroups))
+	for i, g := range config.Spec.BGP.PeerGroups {
+		group := platform.PeerGroup{
+			Key:          fmt.Sprintf("%d", i+1),
+			NodeSelector: g.NodeSelector,
+		}
+		for _, n := range g.Neighbors {
+			group.Neighbors = append(group.Neighbors, platform.DiscoveredNeighbor{
+				Address: n.Address,
+				ASN:     n.RemoteASN,
+			})
+		}
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+// EnsureFRRConfigurationsFromGroups writes one FRRConfiguration per peer group
+// and prunes any managed configuration the groups no longer account for.
+//
+// The generated object name comes from the group's position, so callers must
+// pass groups in a stable order.
+func EnsureFRRConfigurationsFromGroups(
 	ctx context.Context,
 	c client.Client,
 	config *networkingv1alpha1.CUDNBgpConfig,
-	dr *platform.DiscoveryResult,
+	groups []platform.PeerGroup,
 ) (int, error) {
-	azNames := make([]string, 0, len(dr.NeighborsByAZ))
-	for az := range dr.NeighborsByAZ {
-		azNames = append(azNames, az)
-	}
-	sort.Strings(azNames)
-
-	expected := make(map[string]bool, len(azNames))
-	for i, az := range azNames {
+	expected := make(map[string]bool, len(groups))
+	for i, group := range groups {
 		name := fmt.Sprintf("%s%d", FRRConfigNamePrefix, i+1)
 		expected[name] = true
-
-		neighbors := dr.NeighborsByAZ[az]
-		syntheticAZ := networkingv1alpha1.AvailabilityZone{
-			NodeSelector: map[string]string{"topology.kubernetes.io/zone": az},
-		}
-		for _, n := range neighbors {
-			syntheticAZ.Neighbors = append(syntheticAZ.Neighbors, networkingv1alpha1.BGPNeighbor{
-				Address:   n.Address,
-				RemoteASN: n.ASN,
-			})
-		}
-
-		if err := ensureSingleFRRConfiguration(ctx, c, config, syntheticAZ, name); err != nil {
-			return 0, fmt.Errorf("AZ %s: %w", az, err)
+		if err := ensureSingleFRRConfiguration(ctx, c, config, group, name); err != nil {
+			return 0, fmt.Errorf("peer group %s: %w", group.Key, err)
 		}
 	}
 
@@ -137,23 +122,23 @@ func EnsureFRRConfigurationsFromDiscovery(
 			}
 		}
 	}
-	return len(azNames), nil
+	return len(groups), nil
 }
 
 func ensureSingleFRRConfiguration(
 	ctx context.Context,
 	c client.Client,
 	config *networkingv1alpha1.CUDNBgpConfig,
-	az networkingv1alpha1.AvailabilityZone,
+	group platform.PeerGroup,
 	name string,
 ) error {
-	nodeSelector := mergeLabels(config.Spec.RouterNodeSelector, az.NodeSelector)
+	nodeSelector := mergeLabels(config.Spec.RouterNodeSelector, group.NodeSelector)
 
-	neighbors := make([]interface{}, 0, len(az.Neighbors))
-	for _, n := range az.Neighbors {
+	neighbors := make([]interface{}, 0, len(group.Neighbors))
+	for _, n := range group.Neighbors {
 		neighbor := map[string]interface{}{
 			"address":   n.Address,
-			"asn":       n.RemoteASN,
+			"asn":       n.ASN,
 			"disableMP": true,
 			"toReceive": map[string]interface{}{
 				"allowed": map[string]interface{}{

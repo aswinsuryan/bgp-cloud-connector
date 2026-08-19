@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +35,6 @@ import (
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
-	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
 )
 
 func configTestScheme() *runtime.Scheme {
@@ -56,10 +56,11 @@ func newTestCUDNBgpConfig() *networkingv1alpha1.CUDNBgpConfig {
 			Name: "cluster",
 		},
 		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
+			Platform: networkingv1alpha1.PlatformManual,
 			BGP: networkingv1alpha1.BGPConfig{
 				LocalASN:          65001,
 				LivenessDetection: networkingv1alpha1.LivenessDetectionBGPKeepalive,
-				AvailabilityZones: []networkingv1alpha1.AvailabilityZone{
+				PeerGroups: []networkingv1alpha1.PeerGroup{
 					{
 						NodeSelector: map[string]string{"bgp_router_subnet": "1"},
 						Neighbors: []networkingv1alpha1.BGPNeighbor{
@@ -135,7 +136,7 @@ func TestConfigReconcile_FullReconcile(t *testing.T) {
 	// Verify FRRConfiguration was created
 	frrConfig := &unstructured.Unstructured{}
 	frrConfig.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-az-1", Namespace: FRRNamespace}, frrConfig); err != nil {
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, frrConfig); err != nil {
 		t.Fatalf("FRRConfiguration not created: %v", err)
 	}
 }
@@ -207,20 +208,12 @@ func (m *mockPlatform) DiscoverEndpoints(_ context.Context) (*platform.Discovery
 		return m.discoverResult, nil
 	}
 	return &platform.DiscoveryResult{
-		RouteServers: []platform.DiscoveredRouteServer{
+		PeerGroups: []platform.PeerGroup{
 			{
-				RouteServerID: "rs-1",
-				RemoteASN:     64512,
-				Endpoints: []platform.DiscoveredEndpoint{
-					{EndpointID: "rse-001", AZ: "us-east-1a", Address: "10.0.1.47"},
-				},
+				Key:          "us-east-1a",
+				NodeSelector: map[string]string{"topology.kubernetes.io/zone": "us-east-1a"},
+				Neighbors:    []platform.DiscoveredNeighbor{{Address: "10.0.1.47", ASN: 64512}},
 			},
-		},
-		NeighborsByAZ: map[string][]platform.DiscoveredNeighbor{
-			"us-east-1a": {{Address: "10.0.1.47", ASN: 64512}},
-		},
-		EndpointsByAZ: map[string][]string{
-			"us-east-1a": {"rse-001"},
 		},
 	}, nil
 }
@@ -242,6 +235,7 @@ func newTestCUDNBgpConfigWithAWS() *networkingv1alpha1.CUDNBgpConfig {
 			Name: "cluster",
 		},
 		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
+			Platform: networkingv1alpha1.PlatformAWS,
 			BGP: networkingv1alpha1.BGPConfig{
 				LocalASN:          65001,
 				LivenessDetection: networkingv1alpha1.LivenessDetectionBGPKeepalive,
@@ -325,22 +319,27 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	if len(updated.Status.Conditions) != 5 {
 		t.Errorf("expected 5 conditions, got %d", len(updated.Status.Conditions))
 	}
-	if updated.Status.AWS == nil {
-		t.Fatal("expected status.aws to be populated")
+	// The discovered plan is reported cloud-neutrally: what FRR was told to
+	// peer with, rather than the route servers one cloud happens to have.
+	if len(updated.Status.PeerGroups) != 1 {
+		t.Fatalf("expected 1 peer group in status, got %d", len(updated.Status.PeerGroups))
 	}
-	if len(updated.Status.AWS.RouteServers) != 1 {
-		t.Errorf("expected 1 route server in status, got %d", len(updated.Status.AWS.RouteServers))
+	if got := updated.Status.PeerGroups[0].Key; got != "us-east-1a" {
+		t.Errorf("peer group key = %q, want %q", got, "us-east-1a")
+	}
+	if got := updated.Status.PeerGroups[0].Neighbors; len(got) != 1 || got[0].Address != "10.0.1.47" {
+		t.Errorf("peer group neighbours = %v, want one at 10.0.1.47", got)
 	}
 
 	for _, cond := range updated.Status.Conditions {
-		if cond.Type == networkingv1alpha1.ConditionAWSEndpointsDiscovered {
+		if cond.Type == networkingv1alpha1.ConditionCloudEndpointsDiscovered {
 			if cond.Status != metav1.ConditionTrue {
-				t.Errorf("expected AWSEndpointsDiscovered=True, got %s", cond.Status)
+				t.Errorf("expected CloudEndpointsDiscovered=True, got %s", cond.Status)
 			}
 		}
-		if cond.Type == networkingv1alpha1.ConditionAWSResourcesReconciled {
+		if cond.Type == networkingv1alpha1.ConditionCloudResourcesReconciled {
 			if cond.Status != metav1.ConditionTrue {
-				t.Errorf("expected AWSResourcesReconciled=True, got %s", cond.Status)
+				t.Errorf("expected CloudResourcesReconciled=True, got %s", cond.Status)
 			}
 		}
 	}
@@ -348,7 +347,7 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	// Verify FRR was created from discovery
 	frrConfig := &unstructured.Unstructured{}
 	frrConfig.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-az-1", Namespace: FRRNamespace}, frrConfig); err != nil {
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, frrConfig); err != nil {
 		t.Fatalf("FRRConfiguration not created from discovery: %v", err)
 	}
 }
@@ -380,7 +379,7 @@ func TestConfigReconcile_AWSCredentialFailure(t *testing.T) {
 	r := &CUDNBgpConfigReconciler{
 		Client: c, Scheme: s,
 		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
-			return nil, &awsplatform.CredentialError{Msg: "invalid credentials"}
+			return nil, &platform.CredentialError{Msg: "invalid credentials"}
 		},
 	}
 
@@ -395,14 +394,14 @@ func TestConfigReconcile_AWSCredentialFailure(t *testing.T) {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
 	}
 	for _, cond := range updated.Status.Conditions {
-		if cond.Type == networkingv1alpha1.ConditionAWSEndpointsDiscovered {
-			if cond.Reason != "AWSCredentialsInvalid" {
-				t.Errorf("expected reason AWSCredentialsInvalid, got %s", cond.Reason)
+		if cond.Type == networkingv1alpha1.ConditionCloudEndpointsDiscovered {
+			if cond.Reason != "CloudCredentialsInvalid" {
+				t.Errorf("expected reason CloudCredentialsInvalid, got %s", cond.Reason)
 			}
 			return
 		}
 	}
-	t.Error("AWSEndpointsDiscovered condition not found")
+	t.Error("CloudEndpointsDiscovered condition not found")
 }
 
 func TestConfigReconcile_AWSDiscoveryFailure(t *testing.T) {
@@ -448,14 +447,14 @@ func TestConfigReconcile_AWSDiscoveryFailure(t *testing.T) {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
 	}
 	for _, cond := range updated.Status.Conditions {
-		if cond.Type == networkingv1alpha1.ConditionAWSEndpointsDiscovered {
-			if cond.Reason != "AWSDiscoveryFailed" {
-				t.Errorf("expected reason AWSDiscoveryFailed, got %s", cond.Reason)
+		if cond.Type == networkingv1alpha1.ConditionCloudEndpointsDiscovered {
+			if cond.Reason != "CloudDiscoveryFailed" {
+				t.Errorf("expected reason CloudDiscoveryFailed, got %s", cond.Reason)
 			}
 			return
 		}
 	}
-	t.Error("AWSEndpointsDiscovered condition not found")
+	t.Error("CloudEndpointsDiscovered condition not found")
 }
 
 func TestConfigReconcile_AWSReconcileFailure(t *testing.T) {
@@ -502,14 +501,14 @@ func TestConfigReconcile_AWSReconcileFailure(t *testing.T) {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
 	}
 	for _, cond := range updated.Status.Conditions {
-		if cond.Type == networkingv1alpha1.ConditionAWSResourcesReconciled {
-			if cond.Reason != "AWSReconcileFailed" {
-				t.Errorf("expected reason AWSReconcileFailed, got %s", cond.Reason)
+		if cond.Type == networkingv1alpha1.ConditionCloudResourcesReconciled {
+			if cond.Reason != "CloudReconcileFailed" {
+				t.Errorf("expected reason CloudReconcileFailed, got %s", cond.Reason)
 			}
 			return
 		}
 	}
-	t.Error("AWSResourcesReconciled condition not found")
+	t.Error("CloudResourcesReconciled condition not found")
 }
 
 func TestConfigReconcile_AWSNodeFiltering(t *testing.T) {
@@ -599,7 +598,7 @@ func TestConfigReconcile_DeleteSucceedsWithCredentialFailure(t *testing.T) {
 	r := &CUDNBgpConfigReconciler{
 		Client: c, Scheme: s,
 		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
-			return nil, &awsplatform.CredentialError{Msg: "invalid credentials"}
+			return nil, &platform.CredentialError{Msg: "invalid credentials"}
 		},
 	}
 
@@ -629,7 +628,7 @@ func TestConfigReconcile_DeleteSuccessful(t *testing.T) {
 			"apiVersion": "frrk8s.metallb.io/v1beta1",
 			"kind":       "FRRConfiguration",
 			"metadata": map[string]interface{}{
-				"name":      "cudn-bgp-az-1",
+				"name":      "cudn-bgp-1",
 				"namespace": FRRNamespace,
 				"labels":    map[string]interface{}{LabelManagedBy: LabelManagedByVal},
 			},
@@ -663,7 +662,7 @@ func TestConfigReconcile_DeleteSuccessful(t *testing.T) {
 
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-az-1", Namespace: FRRNamespace}, obj); err == nil {
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, obj); err == nil {
 		t.Error("FRRConfiguration should be deleted during cleanup")
 	}
 
@@ -673,5 +672,107 @@ func TestConfigReconcile_DeleteSuccessful(t *testing.T) {
 		if f == ConfigFinalizerName {
 			t.Error("finalizer should be removed after successful deletion")
 		}
+	}
+}
+
+// TestDefaultPlatformBuilder_EveryEnumValueDispatches walks the enum itself
+// rather than a list maintained beside it.
+//
+// A value added to the API and never given a builder is the failure this
+// exists for: every other test injects a fake through PlatformBuilder and
+// never reaches this switch, so a missing arm compiles, passes and then fails
+// on a cluster with "no platform implementation".
+//
+// An error is expected here rather than a platform, because building one reads
+// Infrastructure/cluster and the fake client has none. What must not happen is
+// falling through to the default arm.
+func TestDefaultPlatformBuilder_EveryEnumValueDispatches(t *testing.T) {
+	for _, p := range networkingv1alpha1.AllPlatforms {
+		if p == networkingv1alpha1.PlatformManual {
+			continue // Manual builds no platform by design.
+		}
+		t.Run(string(p), func(t *testing.T) {
+			config := newTestCUDNBgpConfigWithAWS()
+			config.Spec.Platform = p
+			c := fake.NewClientBuilder().WithScheme(configTestScheme()).Build()
+
+			_, err := defaultPlatformBuilder(context.Background(), c, config)
+			if err != nil && strings.Contains(err.Error(), "no platform implementation") {
+				t.Errorf("%s reached the default arm: %v", p, err)
+			}
+		})
+	}
+}
+
+// TestConfigReconcile_ManualSkipsPlatform pins that a Manual configuration
+// constructs no cloud platform and reports none of the cloud conditions, so it
+// needs no cloud credentials.
+//
+// The gate moved from "is spec.aws set" to "is the platform Manual", and that
+// expression is the only thing standing between a Manual cluster and an
+// attempt to reach a cloud API it has no business calling.
+func TestConfigReconcile_ManualSkipsPlatform(t *testing.T) {
+	config := newTestCUDNBgpConfig() // Platform: Manual
+	s := configTestScheme()
+
+	network := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operator.openshift.io/v1",
+			"kind":       "Network",
+			"metadata":   map[string]interface{}{"name": "cluster"},
+			"spec":       map[string]interface{}{},
+		},
+	}
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, network, frrNS, frrPod).
+		WithStatusSubresource(config).
+		Build()
+
+	builderCalled := false
+	r := &CUDNBgpConfigReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+			builderCalled = true
+			return &mockPlatform{}, nil
+		},
+	}
+
+	_, _ = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+
+	if builderCalled {
+		t.Error("Manual must not construct a cloud platform")
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	_ = c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated)
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == networkingv1alpha1.ConditionCloudEndpointsDiscovered ||
+			cond.Type == networkingv1alpha1.ConditionCloudResourcesReconciled {
+			t.Errorf("Manual must not report %s", cond.Type)
+		}
+	}
+	if len(updated.Status.PeerGroups) != 0 {
+		t.Errorf("Manual discovers nothing, so status.peerGroups should be empty, got %d", len(updated.Status.PeerGroups))
+	}
+}
+
+// TestDefaultPlatformBuilder_UnknownPlatform pins what the default arm is for.
+func TestDefaultPlatformBuilder_UnknownPlatform(t *testing.T) {
+	config := newTestCUDNBgpConfigWithAWS()
+	config.Spec.Platform = networkingv1alpha1.PlatformType("Nowhere")
+	c := fake.NewClientBuilder().WithScheme(configTestScheme()).Build()
+
+	_, err := defaultPlatformBuilder(context.Background(), c, config)
+	if err == nil || !strings.Contains(err.Error(), "no platform implementation") {
+		t.Errorf("expected an unknown platform to be refused, got %v", err)
 	}
 }
