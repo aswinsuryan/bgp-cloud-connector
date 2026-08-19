@@ -31,6 +31,12 @@ type PeerGroup struct {
 	// emits.
 	NodeSelector map[string]string
 	Neighbors    []DiscoveredNeighbor
+	// RawFRRConfig, when non-empty, becomes spec.raw.rawConfig on the
+	// generated FRRConfiguration. Some clouds need FRR directives frr-k8s
+	// does not express as fields: a GCP Cloud Router interface needs
+	// disable-connected-check, which has no structured equivalent. Without
+	// this a platform needing one could not be rendered here at all.
+	RawFRRConfig string
 }
 
 // DiscoveryResult is the peering plan a cloud arrived at.

@@ -314,3 +314,77 @@ func TestEnsureFRRConfigurationsFromGroups_SingleRegionalGroup(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureFRRConfigurationsFromGroups_RawFRRConfig covers a platform whose
+// peering needs FRR directives the structured neighbour API cannot express.
+//
+// GCP is the case: a Cloud Router interface is not on the node's link in the
+// way FRR expects, so the session needs disable-connected-check, for which
+// frr-k8s has no field. Without somewhere to put it, a platform that needs one
+// cannot be implemented behind this renderer at all.
+//
+// A group that does not ask for one must produce no spec.raw, which is what
+// keeps the AWS output unchanged.
+func TestEnsureFRRConfigurationsFromGroups_RawFRRConfig(t *testing.T) {
+	s := testScheme()
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns).Build()
+	ctx := context.Background()
+
+	config := &networkingv1alpha1.CUDNBgpConfig{
+		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
+			Platform:           networkingv1alpha1.PlatformAWS,
+			BGP:                networkingv1alpha1.BGPConfig{LocalASN: 65001},
+			RouterNodeSelector: map[string]string{"bgp_router": "true"},
+		},
+	}
+
+	raw := "      router bgp 65001\n       neighbor 10.0.0.5 disable-connected-check\n"
+	groups := []platform.PeerGroup{
+		{
+			Key:          "my-cloud-router",
+			Neighbors:    []platform.DiscoveredNeighbor{{Address: "10.0.0.5", ASN: 65000}},
+			RawFRRConfig: raw,
+		},
+		{
+			Key:       "no-raw",
+			Neighbors: []platform.DiscoveredNeighbor{{Address: "10.0.0.6", ASN: 65000}},
+		},
+	}
+
+	if _, err := EnsureFRRConfigurationsFromGroups(ctx, c, config, groups); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	withRaw := &unstructured.Unstructured{}
+	withRaw.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, withRaw); err != nil {
+		t.Fatalf("cudn-bgp-1 not created: %v", err)
+	}
+	got, found, err := unstructured.NestedString(withRaw.Object, "spec", "raw", "rawConfig")
+	if err != nil || !found {
+		t.Fatalf("spec.raw.rawConfig not set (found=%t, err=%v)", found, err)
+	}
+	if got != raw {
+		t.Errorf("spec.raw.rawConfig = %q, want %q", got, raw)
+	}
+	prio, found, err := unstructured.NestedInt64(withRaw.Object, "spec", "raw", "priority")
+	if err != nil || !found {
+		t.Fatalf("spec.raw.priority not set (found=%t, err=%v)", found, err)
+	}
+	if prio != RawFRRConfigPriority {
+		t.Errorf("spec.raw.priority = %d, want %d", prio, RawFRRConfigPriority)
+	}
+
+	withoutRaw := &unstructured.Unstructured{}
+	withoutRaw.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-2", Namespace: FRRNamespace}, withoutRaw); err != nil {
+		t.Fatalf("cudn-bgp-2 not created: %v", err)
+	}
+	if _, found, _ := unstructured.NestedMap(withoutRaw.Object, "spec", "raw"); found {
+		t.Error("spec.raw should be absent when the group asks for no raw config")
+	}
+}
