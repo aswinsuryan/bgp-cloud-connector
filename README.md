@@ -1,4 +1,4 @@
-# CUDN BGP Routing Operator
+# BGP cloud connector
 
 Kubernetes operator for OpenShift that automates L3 direct routing between CUDN Pod networks and external networks via BGP. Replaces the manual in-cluster steps from the [rosa-bgp PoC](https://github.com/msemanrh/rosa-bgp).
 

@@ -1,6 +1,6 @@
 # Controller Test Plan
 
-Tests for the CUDN BGP Routing Operator controllers and helpers. Unit tests are split into two sections:
+Tests for the BGP cloud connector controllers and helpers. Unit tests are split into two sections:
 
 - **Basic (platform-independent)** — tests the controller reconciliation logic with explicit `spec.bgp.availabilityZones`, no cloud provider involved.
 - **Platform interface** — tests the controller's interaction with the generic `CloudPlatform` interface (Phases 3 and 5: discovery + cloud resource reconciliation). The interface is provider-agnostic; AWS is used as the first concrete mock implementation.

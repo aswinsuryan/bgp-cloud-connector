@@ -1,6 +1,6 @@
 # AWS Test Plan
 
-Automated test plan for the CUDN BGP Routing Operator's AWS platform integration.
+Automated test plan for the BGP cloud connector's AWS platform integration.
 
 - [Test Configuration](#test-configuration)
 - [Unit Tests (Mocked EC2)](#unit-tests-mocked-ec2)

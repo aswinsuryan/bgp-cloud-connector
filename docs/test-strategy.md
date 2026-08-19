@@ -1,6 +1,6 @@
 # Test Strategy
 
-Test strategy for the CUDN BGP Routing Operator. The operator has two layers of functionality — core BGP/CUDN reconciliation (platform-independent) and cloud platform integration (per-provider). This document describes the shared test structure that all platform-specific test plans follow.
+Test strategy for the BGP cloud connector. The operator has two layers of functionality — core BGP/CUDN reconciliation (platform-independent) and cloud platform integration (per-provider). This document describes the shared test structure that all platform-specific test plans follow.
 
 - [Coverage by layer and location](#coverage-by-layer-and-location)
 - [Test Layers](#test-layers)

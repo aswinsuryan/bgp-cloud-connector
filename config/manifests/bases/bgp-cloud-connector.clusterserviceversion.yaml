@@ -73,7 +73,7 @@ spec:
     **Important:** This is a preview release for internal testing purposes only.
     It is not supported by Red Hat and is not intended for production use by customers.
 
-    CUDN BGP Routing Operator automates L3 direct routing between
+    BGP cloud connector automates L3 direct routing between
     Cluster User Defined Networks (CUDN) and external networks via BGP
     on OpenShift. Core BGP and CUDN functionality works on any OpenShift
     cluster with external BGP servers. When platform configuration is
