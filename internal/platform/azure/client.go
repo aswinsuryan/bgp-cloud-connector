@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v6"
 )
@@ -91,9 +93,26 @@ type nicClient struct {
 	interfaces *armnetwork.InterfacesClient
 }
 
-// NewNICClient builds a NICClient using the default Azure credential chain.
-func NewNICClient(subscriptionID string) (NICClient, error) {
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
+// NewNICClient builds a NICClient.
+//
+// With no clientID it uses the default credential chain, as the Route Server
+// clients do. With one it exchanges the operator's projected service account
+// token for that managed identity instead, which is how interfaces in a
+// resource group the operator's own identity cannot write to are reached. The
+// token file and tenant come from the environment the workload identity
+// webhook already populates.
+func NewNICClient(subscriptionID, clientID string) (NICClient, error) {
+	var (
+		cred azcore.TokenCredential
+		err  error
+	)
+	if clientID == "" {
+		cred, err = azidentity.NewDefaultAzureCredential(nil)
+	} else {
+		cred, err = azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
+			ClientID: clientID,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("azure credential: %w", err)
 	}

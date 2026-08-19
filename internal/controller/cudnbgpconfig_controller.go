@@ -304,6 +304,7 @@ func buildAzurePlatform(ctx context.Context, c client.Client, config *networking
 		SubscriptionID:  azureSpec.SubscriptionID,
 		ResourceGroup:   azureSpec.ResourceGroup,
 		RouteServerName: azureSpec.RouteServerName,
+		NICClientID:     azureSpec.NetworkInterfaceClientID,
 		LocalASN:        config.Spec.BGP.LocalASN,
 		ClusterID:       clusterID,
 	})

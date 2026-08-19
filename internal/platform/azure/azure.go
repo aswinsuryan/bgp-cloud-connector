@@ -26,6 +26,9 @@ type Config struct {
 	// ClusterID names the peerings, so that a Route Server reached by more
 	// than one cluster does not have them confused.
 	ClusterID string
+	// NICClientID is the managed identity to use for network interface calls.
+	// Empty means the same identity as everything else.
+	NICClientID string
 }
 
 // Platform reconciles Azure Route Server peerings and router node interfaces.
@@ -46,7 +49,7 @@ func New(cfg Config) (*Platform, error) {
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("Azure virtual hub client: %v", err)}
 	}
-	nics, err := NewNICClient(cfg.SubscriptionID)
+	nics, err := NewNICClient(cfg.SubscriptionID, cfg.NICClientID)
 	if err != nil {
 		return nil, &platform.CredentialError{Msg: fmt.Sprintf("Azure network interface client: %v", err)}
 	}
