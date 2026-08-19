@@ -139,25 +139,7 @@ func (c *computeClient) ReconcilePeers(ctx context.Context, routerName, clusterN
 		return false, err
 	}
 
-	sorted := append([]RouterNode(nil), nodes...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-
-	var desired []*compute.RouterBgpPeer
-	for idx := range sorted {
-		for ifaceIdx, ifaceName := range topology.InterfaceNames {
-			if ifaceIdx >= len(topology.InterfaceIPs) {
-				break
-			}
-			desired = append(desired, &compute.RouterBgpPeer{
-				Name:                    fmt.Sprintf("%s-bgp-peer-%d-%d", clusterName, idx, ifaceIdx),
-				InterfaceName:           ifaceName,
-				PeerIpAddress:           sorted[idx].IPAddress,
-				IpAddress:               topology.InterfaceIPs[ifaceIdx],
-				PeerAsn:                 int64(frrASN),
-				RouterApplianceInstance: sorted[idx].SelfLink,
-			})
-		}
-	}
+	desired := mergePeers(r.BgpPeers, desiredPeers(clusterName, nodes, topology, frrASN), clusterName)
 
 	currentSet := buildPeerSet(r.BgpPeers)
 	desiredSet := buildPeerSet(desired)
@@ -176,15 +158,16 @@ func (c *computeClient) ReconcilePeers(ctx context.Context, routerName, clusterN
 	return true, nil
 }
 
-func (c *computeClient) ClearPeers(ctx context.Context, routerName string) (bool, error) {
+func (c *computeClient) ClearPeers(ctx context.Context, routerName, clusterName string) (bool, error) {
 	r, err := c.routers.Get(c.project, c.region, routerName).Context(ctx).Do()
 	if err != nil {
 		return false, err
 	}
-	if len(r.BgpPeers) == 0 {
+	kept := mergePeers(r.BgpPeers, nil, clusterName)
+	if len(kept) == len(r.BgpPeers) {
 		return false, nil
 	}
-	r.BgpPeers = nil
+	r.BgpPeers = kept
 	op, err := c.routers.Update(c.project, c.region, routerName, r).Context(ctx).Do()
 	if err != nil {
 		if ge, ok := err.(*googleapi.Error); ok && ge.Code == 400 {
@@ -219,6 +202,83 @@ func (c *computeClient) waitRegionOp(ctx context.Context, op *compute.Operation)
 			return nil
 		}
 	}
+}
+
+// maxPeerNameLength is the GCE limit on a Cloud Router peer name.
+const maxPeerNameLength = 63
+
+// peerPrefix is the ownership signal. A Cloud Router peer is a field inside
+// the router resource and cannot carry labels, so unlike the AWS tag this is
+// the only marker available, and it is why nothing here touches a peer whose
+// name does not carry it.
+func peerPrefix(clusterName string) string {
+	return clusterName + "-bgp"
+}
+
+// PeerName is the Cloud Router peer name for a node address and router
+// interface.
+//
+// The address is the key rather than the node's position in the list. Naming
+// peers positionally means one node leaving renumbers every peer after it,
+// and since a patch replaces the whole list that is a delete and a create:
+// every surviving node's session drops because an unrelated node went away.
+func PeerName(clusterName, ipAddress string, ifaceIdx int) string {
+	suffix := fmt.Sprintf("-%s-%d", strings.ReplaceAll(ipAddress, ".", "-"), ifaceIdx)
+	prefix := peerPrefix(clusterName)
+	if len(prefix)+len(suffix) > maxPeerNameLength {
+		prefix = prefix[:maxPeerNameLength-len(suffix)]
+	}
+	return prefix + suffix
+}
+
+// isOurPeer reports whether a peer name was generated for this cluster. The
+// trailing separator matters: without it a cluster named "cluster" would claim
+// the peers of one named "cluster-two".
+func isOurPeer(name, clusterName string) bool {
+	return strings.HasPrefix(name, peerPrefix(clusterName)+"-")
+}
+
+// desiredPeers builds one peer per node and router interface, ordered by name
+// so an unchanged node set produces an identical list.
+func desiredPeers(clusterName string, nodes []RouterNode, topology *CloudRouterTopology, frrASN int) []*compute.RouterBgpPeer {
+	var peers []*compute.RouterBgpPeer
+	for _, node := range nodes {
+		for ifaceIdx, ifaceName := range topology.InterfaceNames {
+			if ifaceIdx >= len(topology.InterfaceIPs) {
+				break
+			}
+			peers = append(peers, &compute.RouterBgpPeer{
+				Name:                    PeerName(clusterName, node.IPAddress, ifaceIdx),
+				InterfaceName:           ifaceName,
+				PeerIpAddress:           node.IPAddress,
+				IpAddress:               topology.InterfaceIPs[ifaceIdx],
+				PeerAsn:                 int64(frrASN),
+				RouterApplianceInstance: node.SelfLink,
+			})
+		}
+	}
+	sortPeers(peers)
+	return peers
+}
+
+// mergePeers returns the peer list to write: every peer that is not ours, left
+// exactly as found, plus our desired set. Routers.Patch uses JSON merge patch,
+// so the array is replaced wholesale and anything omitted here is deleted,
+// including peers belonging to another cluster sharing the router.
+func mergePeers(existing, desired []*compute.RouterBgpPeer, clusterName string) []*compute.RouterBgpPeer {
+	out := make([]*compute.RouterBgpPeer, 0, len(existing)+len(desired))
+	for _, p := range existing {
+		if p != nil && !isOurPeer(p.Name, clusterName) {
+			out = append(out, p)
+		}
+	}
+	out = append(out, desired...)
+	sortPeers(out)
+	return out
+}
+
+func sortPeers(peers []*compute.RouterBgpPeer) {
+	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
 }
 
 type peerKey struct {
