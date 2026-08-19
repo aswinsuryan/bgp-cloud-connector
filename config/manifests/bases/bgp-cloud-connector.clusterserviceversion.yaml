@@ -40,7 +40,7 @@ metadata:
     description: Automates L3 direct routing between CUDN Pod networks and external
       networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
       on AWS (VPC Route Server) and works on-premise with explicit configuration.
-    features.operators.openshift.io/disconnected: "false"
+    features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "false"
     features.operators.openshift.io/proxy-aware: "false"
     features.operators.openshift.io/tls-profiles: "false"
@@ -103,4 +103,7 @@ spec:
   minKubeVersion: 1.31.0
   provider:
     name: Red Hat
+  relatedImages:
+  - image: controller:latest
+    name: bgp-cloud-connector
   version: 0.0.1
