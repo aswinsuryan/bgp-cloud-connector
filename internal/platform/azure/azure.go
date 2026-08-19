@@ -53,7 +53,9 @@ func New(cfg Config) (*Platform, error) {
 	return &Platform{cfg: cfg, rs: rs, topo: topo, nics: nics}, nil
 }
 
-// peeringPrefix names peerings for the cluster they belong to.
+// peeringPrefix is the ownership signal. An Azure BGP connection carries no
+// tags, so as on GCP the name is the only marker available, and it is why
+// nothing here touches a peering that does not carry it.
 func peeringPrefix(clusterID string) string {
 	return clusterID + "-bgp"
 }
@@ -69,6 +71,13 @@ func peeringName(clusterID, address string) string {
 		prefix = prefix[:maxPeeringNameLength-len(suffix)]
 	}
 	return prefix + suffix
+}
+
+// isOurPeering reports whether a peering was created for this cluster. The
+// trailing separator matters: without it a cluster named "cluster" would claim
+// the peerings of one named "cluster-two".
+func isOurPeering(name, clusterID string) bool {
+	return strings.HasPrefix(name, peeringPrefix(clusterID)+"-")
 }
 
 // ReconcileNodes brings router node interfaces and Route Server peerings into
@@ -96,7 +105,7 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 		})
 	}
 
-	changed, err := p.rs.ReconcilePeers(ctx, desired)
+	changed, err := p.reconcileOurPeerings(ctx, desired)
 	if err != nil {
 		return fmt.Errorf("reconciling Route Server peerings: %w", err)
 	}
@@ -107,11 +116,42 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 	return nil
 }
 
-// Cleanup removes the Route Server's BGP peerings.
+// reconcileOurPeerings writes this cluster's peerings without disturbing any
+// others.
+//
+// ReconcilePeers removes every peering absent from the set it is given, so
+// peerings belonging to another cluster are added to that set and survive.
+func (p *Platform) reconcileOurPeerings(ctx context.Context, desired []Peer) (bool, error) {
+	current, err := p.rs.ListPeers(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, c := range current {
+		if !isOurPeering(c.Name, p.cfg.ClusterID) {
+			desired = append(desired, c.Peer)
+		}
+	}
+	return p.rs.ReconcilePeers(ctx, desired)
+}
+
+// Cleanup removes this cluster's Route Server peerings and nothing else.
 //
 // Interface forwarding is left enabled, as it is on AWS and GCP.
 func (p *Platform) Cleanup(ctx context.Context) error {
-	return p.rs.DeleteAllPeers(ctx)
+	current, err := p.rs.ListPeers(ctx)
+	if err != nil {
+		return fmt.Errorf("listing Route Server peerings: %w", err)
+	}
+	keep := make([]Peer, 0, len(current))
+	for _, c := range current {
+		if !isOurPeering(c.Name, p.cfg.ClusterID) {
+			keep = append(keep, c.Peer)
+		}
+	}
+	if _, err := p.rs.ReconcilePeers(ctx, keep); err != nil {
+		return fmt.Errorf("removing Route Server peerings: %w", err)
+	}
+	return nil
 }
 
 // toVirtualMachines resolves the cloud-neutral node list into Azure VM

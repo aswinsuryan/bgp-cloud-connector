@@ -39,6 +39,16 @@ func TestParseProviderID(t *testing.T) {
 	}
 }
 
+func TestIsOurPeering(t *testing.T) {
+	name := peeringName("cluster-two", "10.0.128.4")
+	if isOurPeering(name, "cluster") {
+		t.Errorf("%q was claimed by cluster %q", name, "cluster")
+	}
+	if !isOurPeering(name, "cluster-two") {
+		t.Errorf("%q was not claimed by its own cluster", name)
+	}
+}
+
 func TestPeeringName_KeyedOnAddressAndWithinLimit(t *testing.T) {
 	// Two nodes, and the name follows the address rather than any ordering.
 	a := peeringName("cluster", "10.0.128.4")
@@ -95,6 +105,52 @@ func (f *fakeNICs) EnableIPForwarding(_ context.Context, _, name string) error {
 type fakeTopo struct{ t *RouteServerTopology }
 
 func (f *fakeTopo) GetTopology(_ context.Context) (*RouteServerTopology, error) { return f.t, nil }
+
+// TestReconcileOurPeerings_LeavesOtherClustersAlone covers a Route Server
+// reached by two clusters. ReconcilePeers removes every peering absent from
+// the set it is given, so another cluster's have to be in it.
+func TestReconcileOurPeerings_LeavesOtherClustersAlone(t *testing.T) {
+	rs := &fakeRS{current: []ObservedPeer{
+		{Peer: Peer{Name: "other-bgp-10-9-9-9", PeerIP: "10.9.9.9", PeerASN: 65001}},
+		{Peer: Peer{Name: "hand-made", PeerIP: "10.9.9.10", PeerASN: 65001}},
+		{Peer: Peer{Name: peeringName("cluster", "10.0.128.4"), PeerIP: "10.0.128.4", PeerASN: 65001}},
+	}}
+	p := &Platform{cfg: Config{ClusterID: "cluster", LocalASN: 65001}, rs: rs}
+
+	ours := []Peer{{Name: peeringName("cluster", "10.0.128.4"), PeerIP: "10.0.128.4", PeerASN: 65001}}
+	if _, err := p.reconcileOurPeerings(context.Background(), ours); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, d := range rs.desired {
+		got[d.Name] = true
+	}
+	for _, want := range []string{"other-bgp-10-9-9-9", "hand-made"} {
+		if !got[want] {
+			t.Errorf("peering %q belongs to another cluster and would be deleted", want)
+		}
+	}
+	if !got[peeringName("cluster", "10.0.128.4")] {
+		t.Error("our own peering was dropped")
+	}
+}
+
+// TestCleanup_RemovesOnlyOurPeerings is the same property on the way out.
+func TestCleanup_RemovesOnlyOurPeerings(t *testing.T) {
+	rs := &fakeRS{current: []ObservedPeer{
+		{Peer: Peer{Name: "other-bgp-10-9-9-9", PeerIP: "10.9.9.9"}},
+		{Peer: Peer{Name: peeringName("cluster", "10.0.128.4"), PeerIP: "10.0.128.4"}},
+	}}
+	p := &Platform{cfg: Config{ClusterID: "cluster"}, rs: rs}
+
+	if err := p.Cleanup(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rs.desired) != 1 || rs.desired[0].Name != "other-bgp-10-9-9-9" {
+		t.Errorf("kept %v, want only the other cluster's peering", rs.desired)
+	}
+}
 
 // TestEnsureNodesCanForward_MatchesOnVMID pins that the interface is found by
 // the VM's ARM ID rather than by a name convention, and that an interface
