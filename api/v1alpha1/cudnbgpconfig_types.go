@@ -78,6 +78,16 @@ type BGPNeighbor struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=4294967295
 	RemoteASN int64 `json:"remoteASN"`
+	// EBGPMultiHop allows the session to be established with a peer that is
+	// not on this node's link.
+	//
+	// An Azure Route Server needs it, because it sits in its own subnet rather
+	// than on the node's; an AWS Route Server endpoint does not. Declared here
+	// rather than inferred, because whether a neighbour is on the link is a
+	// property of the cloud's topology and not something this operator can
+	// work out.
+	// +optional
+	EBGPMultiHop bool `json:"ebgpMultiHop,omitempty"`
 }
 
 // PeerGroup is a set of router nodes sharing a neighbour set, and becomes one

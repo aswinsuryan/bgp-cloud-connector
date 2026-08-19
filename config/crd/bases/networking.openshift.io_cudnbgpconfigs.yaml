@@ -102,6 +102,17 @@ spec:
                             properties:
                               address:
                                 type: string
+                              ebgpMultiHop:
+                                description: |-
+                                  EBGPMultiHop allows the session to be established with a peer that is
+                                  not on this node's link.
+
+                                  An Azure Route Server needs it, because it sits in its own subnet rather
+                                  than on the node's; an AWS Route Server endpoint does not. Declared here
+                                  rather than inferred, because whether a neighbour is on the link is a
+                                  property of the cloud's topology and not something this operator can
+                                  work out.
+                                type: boolean
                               remoteASN:
                                 format: int64
                                 maximum: 4294967295
@@ -301,6 +312,17 @@ spec:
                         properties:
                           address:
                             type: string
+                          ebgpMultiHop:
+                            description: |-
+                              EBGPMultiHop allows the session to be established with a peer that is
+                              not on this node's link.
+
+                              An Azure Route Server needs it, because it sits in its own subnet rather
+                              than on the node's; an AWS Route Server endpoint does not. Declared here
+                              rather than inferred, because whether a neighbour is on the link is a
+                              property of the cloud's topology and not something this operator can
+                              work out.
+                            type: boolean
                           remoteASN:
                             format: int64
                             maximum: 4294967295

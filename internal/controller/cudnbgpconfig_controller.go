@@ -246,8 +246,9 @@ func peerGroupsToStatus(groups []platform.PeerGroup) []networkingv1alpha1.PeerGr
 		}
 		for _, n := range g.Neighbors {
 			pg.Neighbors = append(pg.Neighbors, networkingv1alpha1.BGPNeighbor{
-				Address:   n.Address,
-				RemoteASN: n.ASN,
+				Address:      n.Address,
+				RemoteASN:    n.ASN,
+				EBGPMultiHop: n.EBGPMultiHop,
 			})
 		}
 		out = append(out, pg)
