@@ -73,6 +73,31 @@ spec:
                 - region
                 - routeServerIDs
                 type: object
+              azure:
+                description: |-
+                  AzureConfig names the Route Server. Its addresses and ASN are read from it
+                  rather than declared: there is exactly one per virtual network, so there is
+                  nothing to enumerate, and Azure fixes the far-side ASN with no flag to
+                  change it.
+                properties:
+                  resourceGroup:
+                    minLength: 1
+                    type: string
+                  routeServerName:
+                    description: |-
+                      RouteServerName is the Azure Route Server whose BGP connections this
+                      operator manages. Azure models it as a Virtual Hub, and its
+                      virtualRouterIps become the BGP neighbours.
+                    minLength: 1
+                    type: string
+                  subscriptionID:
+                    minLength: 1
+                    type: string
+                required:
+                - resourceGroup
+                - routeServerName
+                - subscriptionID
+                type: object
               bgp:
                 properties:
                   livenessDetection:
@@ -198,6 +223,7 @@ spec:
                   against. It is the discriminator for the cloud-specific block in the spec.
                 enum:
                 - AWS
+                - Azure
                 - GCP
                 - Manual
                 type: string
@@ -214,6 +240,9 @@ spec:
             - message: spec.aws must be set when spec.platform is AWS, and must be
                 absent otherwise
               rule: (self.platform == 'AWS') == has(self.aws)
+            - message: spec.azure must be set when spec.platform is Azure, and must
+                be absent otherwise
+              rule: (self.platform == 'Azure') == has(self.azure)
             - message: spec.gcp must be set when spec.platform is GCP, and must be
                 absent otherwise
               rule: (self.platform == 'GCP') == has(self.gcp)
