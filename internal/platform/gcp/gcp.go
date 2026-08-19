@@ -61,7 +61,7 @@ func (p *Platform) DiscoverEndpoints(ctx context.Context) (*platform.DiscoveryRe
 		return nil, fmt.Errorf("reading Cloud Router %q topology: %w", p.cfg.CloudRouterName, err)
 	}
 	if len(topology.InterfaceIPs) == 0 {
-		return nil, fmt.Errorf("Cloud Router %q has no interfaces", p.cfg.CloudRouterName)
+		return nil, fmt.Errorf("no interfaces on Cloud Router %q", p.cfg.CloudRouterName)
 	}
 
 	group := platform.PeerGroup{

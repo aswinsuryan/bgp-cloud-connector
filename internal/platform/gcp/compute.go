@@ -113,7 +113,8 @@ func (c *computeClient) GetRouterTopology(ctx context.Context, routerName string
 	if err != nil {
 		return nil, err
 	}
-	var names, ips []string
+	names := make([]string, 0, len(r.Interfaces))
+	ips := make([]string, 0, len(r.Interfaces))
 	for _, iface := range r.Interfaces {
 		names = append(names, iface.Name)
 		ip := iface.IpRange
