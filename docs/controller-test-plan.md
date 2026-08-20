@@ -2,7 +2,7 @@
 
 Tests for the BGP cloud connector controllers and helpers. Unit tests are split into two sections:
 
-- **Basic (platform-independent)** — tests the controller reconciliation logic with explicit `spec.bgp.availabilityZones`, no cloud provider involved.
+- **Basic (platform-independent)** — tests the controller reconciliation logic with explicit `spec.bgp.peerGroups` under `platform: Manual`, no cloud provider involved.
 - **Platform interface** — tests the controller's interaction with the generic `CloudPlatform` interface (Phases 3 and 5: discovery + cloud resource reconciliation). The interface is provider-agnostic; AWS is used as the first concrete mock implementation.
 
 - [Test Configuration](#test-configuration)
@@ -16,7 +16,7 @@ Tests for the BGP cloud connector controllers and helpers. Unit tests are split 
 
 ## Test Configuration
 
-**Basic unit tests** use hardcoded values with explicit `spec.bgp.availabilityZones` (no `spec.aws`):
+**Basic unit tests** use hardcoded values with explicit `spec.bgp.peerGroups` under `platform: Manual`:
 
 | Field | Value |
 |:---|:---|
@@ -29,7 +29,7 @@ Tests for the BGP cloud connector controllers and helpers. Unit tests are split 
 
 **Platform interface tests** use `spec.aws` set with a mocked `CloudPlatform` interface. The mock returns a `DiscoveryResult` with 1 Route Server, 1 endpoint (`rse-001` in `us-east-1a`, address `10.0.1.47`, remote ASN `64512`). No real AWS credentials required.
 
-**E2E tests** read CR manifests from a profile directory (`test/e2e/manifests/<profile>/`). Each profile contains a `cudnbgpconfig.yaml` and `cudnbgprouting.yaml` matching the target cluster. Shared E2E tests require explicit `spec.bgp.availabilityZones` (no `spec.aws`). See the `ocp-or18` profile for an example.
+**E2E tests** read CR manifests from a profile directory (`test/e2e/manifests/<profile>/`). Each profile contains a `cudnbgpconfig.yaml` and `cudnbgprouting.yaml` matching the target cluster. Shared E2E tests require explicit `spec.bgp.peerGroups` under `platform: Manual`. See the `ocp-or18` profile for an example.
 
 ---
 
@@ -47,7 +47,7 @@ Tests the controller reconciliation logic without any cloud provider configured.
 
 | ID | Test Case | Setup | Expected Result |
 |:---|:---|:---|:---|
-| UT-01 | Full reconcile (Phases 1-2, 4) | Network CR exists, FRR namespace + pod running, explicit `bgp.availabilityZones` | Network patched, FRRConfigurations created from explicit neighbors, phase=Ready with 3 conditions |
+| UT-01 | Full reconcile (Phases 1-2, 4) | Network CR exists, FRR namespace + pod running, explicit `bgp.peerGroups` | Network patched, FRRConfigurations created from explicit neighbors, phase=Ready with 3 conditions |
 | UT-02 | Delete blocked by routing CRs | CUDNBgpRouting CR exists | Finalizer retained, requeues every 10s |
 
 #### Routing Controller
@@ -91,10 +91,10 @@ Tests the config controller's interaction with the generic `CloudPlatform` inter
 
 | ID | Test Case | Setup | Expected Result |
 |:---|:---|:---|:---|
-| UT-15 | Full reconcile with cloud (Phases 1-5) | spec.aws set with routeServerIDs, mock platform with discovery | AWSEndpointsDiscovered=True, FRRConfigurations created from discovered neighbors, ReconcileNodes called, AWSResourcesReconciled=True, phase=Ready with 5 conditions |
-| UT-16 | Phase 3 credential failure | Mock platform builder returns CredentialError | AWSEndpointsDiscovered=False, reason=AWSCredentialsInvalid, phase=Degraded |
-| UT-17 | Phase 3 discovery failure | Mock platform discovery returns error | AWSEndpointsDiscovered=False, reason=AWSDiscoveryFailed, phase=Degraded, requeue 30s |
-| UT-18 | Phase 5 failure | Mock platform ReconcileNodes returns error | AWSResourcesReconciled=False, reason=AWSReconcileFailed, phase=Degraded, requeue 30s |
+| UT-15 | Full reconcile with cloud (Phases 1-5) | spec.aws set with routeServerIDs, mock platform with discovery | CloudEndpointsDiscovered=True, FRRConfigurations created from discovered neighbors, ReconcileNodes called, CloudResourcesReconciled=True, phase=Ready with 5 conditions |
+| UT-16 | Phase 3 credential failure | Mock platform builder returns CredentialError | CloudEndpointsDiscovered=False, reason=CloudCredentialsInvalid, phase=Degraded |
+| UT-17 | Phase 3 discovery failure | Mock platform discovery returns error | CloudEndpointsDiscovered=False, reason=CloudDiscoveryFailed, phase=Degraded, requeue 30s |
+| UT-18 | Phase 5 failure | Mock platform ReconcileNodes returns error | CloudResourcesReconciled=False, reason=CloudReconcileFailed, phase=Degraded, requeue 30s |
 | UT-19 | Node filtering | 5 nodes: 3 complete, 1 missing IP, 1 missing AZ | Only 3 RouterNodes passed to ReconcileNodes |
 
 #### Deletion
@@ -110,11 +110,11 @@ Tests the config controller's interaction with the generic `CloudPlatform` inter
 
 Platform-independent end-to-end tests that validate behavior only a real cluster with a live BGP peer can exercise — BGP session establishment, route advertisement, drift recovery, and cleanup. Unit tests cover the reconciliation logic; E2E tests verify the downstream effect on actual BGP sessions.
 
-Tests read CR manifests from a profile directory (`test/e2e/manifests/<profile>/`). The `CUDNBgpConfig` CR must use explicit `spec.bgp.availabilityZones` (no `spec.aws`).
+Tests read CR manifests from a profile directory (`test/e2e/manifests/<profile>/`). The `CUDNBgpConfig` CR must use explicit `spec.bgp.peerGroups` under `platform: Manual`.
 
 | Component | How discovered |
 |:---|:---|
-| BGP neighbors, ASN, node selectors | From `CUDNBgpConfig` CR in the profile (`spec.bgp.availabilityZones`) |
+| BGP neighbors, ASN, node selectors | From `CUDNBgpConfig` CR in the profile (`spec.bgp.peerGroups`) |
 | Router nodes | Listed from cluster using CR's `routerNodeSelector` |
 | BGP session state | `BGPSessionState` CRD (`frrk8s.metallb.io/v1beta1`) |
 | FRR running config | `FRRNodeState` CRD (`frrk8s.metallb.io/v1beta1`) |
@@ -150,7 +150,7 @@ make test
 # Prerequisites:
 # - oc login to OCP 4.21+ cluster with an external BGP peer
 # - Operator deployed to the cluster
-# - A profile with CUDNBgpConfig using explicit availabilityZones (no spec.aws)
+# - A profile with CUDNBgpConfig using explicit peerGroups under platform: Manual
 make test-e2e <profile>
 ```
 

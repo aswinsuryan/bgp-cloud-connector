@@ -38,7 +38,7 @@ The overall solution (e.g. AWS) has two layers. The operator manages the in-clus
 │  ├── Patch Network.operator.openshift.io (enable FRR)                │
 │  ├── [if platform configured] Discover RS endpoints, neighbor IPs,   │
 │  │   remote ASN, and AZ mapping via cloud API                        │
-│  ├── FRRConfiguration per AZ (BGP sessions to local RS endpoints)    │
+│  ├── FRRConfiguration per peer group (BGP sessions to its peers)     │
 │  └── [if platform configured] Reconcile cloud networking on          │
 │       node changes (Route Server peers, SourceDestCheck, etc.)       │
 │                                                                      │
@@ -77,7 +77,7 @@ When AWS platform integration is configured, the operator performs additional ac
 | Reconcile Route Server peers | `DescribeRouteServerPeers`, `CreateRouteServerPeer`, `DeleteRouteServerPeer`, `CreateTags` | BGP-enabled worker node added, removed, or IP changed |
 | Disable SourceDestCheck | `DescribeInstances`, `ModifyNetworkInterfaceAttribute` | New BGP-enabled worker node detected |
 
-**Auto-discovery:** The operator discovers Route Server endpoints, their ENI addresses (BGP neighbor IPs), availability zones, and the Route Server's remote ASN automatically from the provided Route Server IDs. The user does not need to specify per-AZ endpoint IDs or neighbor addresses — the operator derives them via `DescribeRouteServerEndpoints` (endpoint ID + ENI address + subnet), `DescribeSubnets` (subnet → AZ mapping), and `DescribeRouteServers` (remote ASN). Discovered data is written to `status.aws` for observability. This also drives FRR configuration generation — the operator creates one FRRConfiguration per discovered AZ with the discovered neighbor addresses.
+**Auto-discovery:** The operator discovers Route Server endpoints, their ENI addresses (BGP neighbor IPs), availability zones, and the Route Server's remote ASN automatically from the provided Route Server IDs. The user does not need to specify per-AZ endpoint IDs or neighbor addresses — the operator derives them via `DescribeRouteServerEndpoints` (endpoint ID + ENI address + subnet), `DescribeSubnets` (subnet → AZ mapping), and `DescribeRouteServers` (remote ASN). The peering plan it arrives at is written to `status.peerGroups` for observability. This also drives FRR configuration generation — the operator creates one FRRConfiguration per discovered AZ with the discovered neighbor addresses.
 
 Route Server peers are created **per-AZ** — each BGP-enabled worker node is peered with its local AZ's Route Server endpoints. Peers are tagged with `managed-by: cudn-bgp-routing-operator/<infrastructureName>` for lifecycle management, where `<infrastructureName>` is read automatically from the OpenShift `Infrastructure/cluster` object (`status.infrastructureName`). This cluster-scoped tag ensures multiple clusters sharing the same VPC Route Server do not interfere with each other's peers. If a peer already exists at a desired IP but was not created by the operator (e.g. created manually or by Terraform), the operator adopts it by adding the `managed-by` tag rather than attempting to create a duplicate.
 
@@ -154,7 +154,7 @@ The OIDC webhook automatically injects `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKE
 oc rollout restart deployment/openshift-cudn-bgp-routing-controller-manager -n openshift-cudn-bgp-routing
 ```
 
-The operator reports credential issues as `AWSCredentialsInvalid` in the `CUDNBgpConfig` status. If you see this condition, verify the IAM role trust policy and permissions, then restart the operator.
+The operator reports credential issues as `CloudCredentialsInvalid` in the `CUDNBgpConfig` status. If you see this condition, verify the IAM role trust policy and permissions, then restart the operator.
 
 ### Multi-cloud extensibility
 
@@ -207,7 +207,7 @@ Two CRDs with clear separation of concerns:
 
 ### CUDNBgpConfig (singleton - without cloud integration - using PoC configuration)
 
-When `spec.aws` is absent, `spec.bgp.availabilityZones` is required — the user provides explicit neighbor addresses and per-AZ node selectors.
+Under `platform: Manual`, `spec.bgp.peerGroups` is required: you provide explicit neighbour addresses and the node selector for each group.
 
 ```yaml
 apiVersion: networking.openshift.io/v1alpha1
@@ -215,13 +215,14 @@ kind: CUDNBgpConfig
 metadata:
   name: cluster
 spec:
+  platform: Manual                  # you declare the peering below
   routerNodeSelector:
     bgp_router: "true"              # must match labels on BGP router machine pools
 
   bgp:
     localASN: 65001                  # terraform output rosa_bgp_asn
     livenessDetection: bgp-keepalive # bfd | bgp-keepalive (default)
-    availabilityZones:
+    peerGroups:
       - nodeSelector:
           topology.kubernetes.io/zone: us-east-1a
           bgp_router_subnet: "1"
@@ -250,7 +251,7 @@ spec:
 
 ### CUDNBgpConfig (singleton - with AWS integration - using PoC configuration)
 
-When `spec.aws` is configured, `spec.bgp.availabilityZones` must not be set — the two sections are mutually exclusive (enforced by CRD validation). The operator auto-discovers Route Server endpoints, BGP neighbor addresses, remote ASN, and AZ mapping from the provided Route Server IDs.
+`spec.platform` selects the cloud, and exactly one matching block is required: `platform: AWS` requires `spec.aws`, and `spec.bgp.peerGroups` is permitted only under `platform: Manual`. Both are enforced by CEL rather than by documentation. On a cloud the operator auto-discovers Route Server endpoints, BGP neighbour addresses, remote ASN and AZ mapping from the provided Route Server IDs.
 
 ```yaml
 apiVersion: networking.openshift.io/v1alpha1
@@ -258,6 +259,7 @@ kind: CUDNBgpConfig
 metadata:
   name: cluster
 spec:
+  platform: AWS                     # requires spec.aws; the peering is discovered
   routerNodeSelector:
     bgp_router: "true"              # must match labels on BGP router machine pools
 
@@ -308,14 +310,17 @@ spec:
 
 | Field | Required | Description |
 |:---|:---|:---|
+| `spec.platform` | Yes | Which platform to reconcile against: `AWS` or `Manual`. `Manual` is not a cloud: it reconciles nothing and takes its peering from `spec.bgp.peerGroups`. Selects which block below is required, and refuses the other (CEL-enforced). |
 | `spec.routerNodeSelector` | Yes | Cluster-wide label selector for all BGP-enabled worker nodes (e.g. `bgp_router: "true"`). Must match labels applied to BGP router machine pools. |
 | `spec.bgp.localASN` | Yes | AS number for the OCP FRR routers. From `terraform output rosa_bgp_asn`. |
-| `spec.bgp.livenessDetection` | No | `bfd` or `bgp-keepalive` (default). Applies to all neighbors. BFD detects peer failure in ~1s (300ms interval × 3 multiplier). BGP keepalive detects peer failure in ~90s (default hold time). Each AZ has 2 RS endpoints, so failover on a single peer failure is automatic. |
-| `spec.bgp.availabilityZones[]` | If `spec.aws` absent | Per-AZ BGP peering groups with explicit neighbor addresses. Required when `spec.aws` is absent. **Must not be set when `spec.aws` is present** — the two are mutually exclusive (CRD-enforced). |
-| `spec.bgp.availabilityZones[].nodeSelector` | If `availabilityZones` set | Labels selecting BGP-enabled worker nodes in this AZ (e.g. `topology.kubernetes.io/zone`, `bgp_router_subnet`). |
-| `spec.bgp.availabilityZones[].neighbors[]` | If `availabilityZones` set | BGP neighbor IPs and ASN in this AZ's subnet. |
-| `spec.aws.region` | If `spec.aws` set | AWS region where the ROSA cluster and Route Server are deployed. |
-| `spec.aws.routeServerIDs[]` | If `spec.aws` set | Route Server IDs for auto-discovery. The operator discovers all endpoints, their ENI addresses (BGP neighbor IPs), AZs (via subnet), and remote ASN. From `terraform output`. |
+| `spec.bgp.livenessDetection` | No | `bfd` or `bgp-keepalive` (default). Applies to all neighbors. BFD detects peer failure in ~1s (300ms interval × 3 multiplier). BGP keepalive detects peer failure in ~90s (default hold time). Whether a single peer failure fails over automatically depends on the platform having a second neighbour in the group to fall back to; on AWS each AZ has 2 Route Server endpoints, so it does. |
+| `spec.bgp.peerGroups[]` | Under `platform: Manual` | BGP peer groups with explicit neighbour addresses. Required under `platform: Manual`, and must not be set on any other platform, where the groups are discovered (CEL-enforced). |
+| `spec.bgp.peerGroups[].nodeSelector` | If `peerGroups` set | Labels selecting the BGP-enabled worker nodes in this group (e.g. `topology.kubernetes.io/zone`, `bgp_router_subnet`). |
+| `spec.bgp.peerGroups[].neighbors[]` | If `peerGroups` set | The BGP neighbour IPs and ASN this group's nodes peer with. |
+| `spec.bgp.peerGroups[].neighbors[].address` | Yes | The neighbour's IP address. |
+| `spec.bgp.peerGroups[].neighbors[].remoteASN` | Yes | The neighbour's AS number. |
+| `spec.aws.region` | Under `platform: AWS` | AWS region where the ROSA cluster and Route Server are deployed. |
+| `spec.aws.routeServerIDs[]` | Under `platform: AWS` | Route Server IDs for auto-discovery. The operator discovers all endpoints, their ENI addresses (BGP neighbor IPs), AZs (via subnet), and remote ASN. From `terraform output`. |
 
 **CUDNBgpConfig status** (populated by the operator):
 
@@ -323,13 +328,10 @@ spec:
 |:---|:---|
 | `status.phase` | Current lifecycle phase: `Pending`, `Configuring`, `Ready`, or `Degraded`. |
 | `status.conditions[]` | Per-phase condition details. |
-| `status.aws.routeServers[]` | Discovered Route Server information (only when `spec.aws` is set). |
-| `status.aws.routeServers[].routeServerID` | The Route Server ID from `spec.aws.routeServerIDs`. |
-| `status.aws.routeServers[].remoteASN` | The Route Server's Amazon-side ASN (used as `remoteASN` for all BGP neighbors). |
-| `status.aws.routeServers[].endpoints[]` | Discovered endpoints for this Route Server. |
-| `status.aws.routeServers[].endpoints[].endpointID` | Route Server endpoint ID (e.g. `rse-0abc1111`). |
-| `status.aws.routeServers[].endpoints[].availabilityZone` | AZ derived from the endpoint's subnet. |
-| `status.aws.routeServers[].endpoints[].address` | ENI address of the endpoint (BGP neighbor IP). |
+| `status.peerGroups[]` | The peering plan the operator discovered and rendered into FRRConfigurations. |
+| `status.peerGroups[].key` | Names the group in cloud terms: the availability zone on AWS. |
+| `status.peerGroups[].nodeSelector` | Narrows `spec.routerNodeSelector` to this group's nodes. |
+| `status.peerGroups[].neighbors[]` | The addresses this group's router nodes peer with. |
 
 **CUDNBgpRouting** (application teams create per project):
 
@@ -355,15 +357,15 @@ spec:
       routeAdvertisements: Enabled
 ```
 
-#### FRRConfiguration (from CUDNBgpConfig — one per AZ)
+#### FRRConfiguration (from CUDNBgpConfig — one per peer group)
 
-The generated FRRConfigurations are identical regardless of whether cloud integration is configured. The only difference is the source of the input data: with cloud integration, neighbor addresses, remote ASN, and AZ mapping are auto-discovered from the Route Server endpoints; without cloud integration, they come from the explicit `spec.bgp.availabilityZones`. The `nodeSelector` is always `routerNodeSelector` merged with the AZ's node selector.
+The generated FRRConfigurations are identical regardless of whether cloud integration is configured. The only difference is the source of the input data: with cloud integration, neighbor addresses, remote ASN, and AZ mapping are auto-discovered from the Route Server endpoints; under `platform: Manual` they come from the explicit `spec.bgp.peerGroups`. The `nodeSelector` is always `routerNodeSelector` merged with the group's node selector.
 
 ```yaml
 apiVersion: frrk8s.metallb.io/v1beta1
 kind: FRRConfiguration
 metadata:
-  name: cudn-bgp-az-1
+  name: cudn-bgp-1
   namespace: openshift-frr-k8s
   labels:
     app.kubernetes.io/managed-by: cudn-bgp-routing-operator
@@ -393,7 +395,7 @@ spec:
 apiVersion: frrk8s.metallb.io/v1beta1
 kind: FRRConfiguration
 metadata:
-  name: cudn-bgp-az-2
+  name: cudn-bgp-2
   namespace: openshift-frr-k8s
   labels:
     app.kubernetes.io/managed-by: cudn-bgp-routing-operator
@@ -423,7 +425,7 @@ spec:
 apiVersion: frrk8s.metallb.io/v1beta1
 kind: FRRConfiguration
 metadata:
-  name: cudn-bgp-az-3
+  name: cudn-bgp-3
   namespace: openshift-frr-k8s
   labels:
     app.kubernetes.io/managed-by: cudn-bgp-routing-operator
@@ -544,16 +546,16 @@ Phase 3: Discover Route Server Infrastructure (if spec.aws configured)
   │     • DescribeSubnets → AZ for each endpoint
   ├── Build per-AZ neighbor list (endpoint address + remote ASN)
   ├── Build per-AZ endpoint ID list (for peer reconciliation)
-  ├── Write discovered data to status.aws.routeServers
-  └── Condition: AWSEndpointsDiscovered
+  ├── Write the discovered peering plan to status.peerGroups
+  └── Condition: CloudEndpointsDiscovered
           │
           ▼
-Phase 4: Apply FRR Configuration (per AZ)
+Phase 4: Apply FRR Configuration (per peer group)
   ├── If spec.aws configured: use discovered AZs, neighbor IPs, and remote ASN
-  │   If spec.aws not configured: use explicit spec.bgp.availabilityZones[]
-  ├── For each AZ, create/update a separate FRRConfiguration CR:
+  │   Under platform: Manual: use explicit spec.bgp.peerGroups[]
+  ├── For each peer group, create/update a separate FRRConfiguration CR:
   │     • nodeSelector: routerNodeSelector + topology.kubernetes.io/zone (discovery)
-  │       or routerNodeSelector + AZ's explicit nodeSelector (without cloud integration)
+  │       or routerNodeSelector + the group's explicit nodeSelector (platform: Manual)
   │     • BGP router ASN: spec.bgp.localASN
   │     • Neighbors: discovered endpoint addresses or explicit neighbor list
   │     • Peer liveness detection: spec.bgp.livenessDetection
@@ -571,7 +573,7 @@ Phase 5: Reconcile AWS Resources (if spec.aws configured)
   ├── Route Server peers: for each AZ, ensure peers exist on the
   │   discovered endpoint IDs for the local BGP-enabled worker nodes only
   ├── Source/dest check: disable on the primary ENI of each node
-  └── Condition: AWSResourcesReconciled
+  └── Condition: CloudResourcesReconciled
           │
           ▼
      phase: Ready
@@ -630,10 +632,10 @@ Both CRs use the same phase enum. `CUDNBgpRouting` follows `Pending` → `Config
 |:---|:---|:---|
 | `NetworkOperatorPatched` | `PatchFailed` | Failed to patch `Network.operator.openshift.io/cluster` |
 | `FRRNamespaceReady` | `CheckFailed` | Error checking FRR readiness (distinct from simply waiting) |
-| `AWSEndpointsDiscovered` | `AWSCredentialsInvalid` | IRSA credentials not available or `sts:GetCallerIdentity` verification failed (check ServiceAccount annotation and IAM role trust policy) |
-| `AWSEndpointsDiscovered` | `AWSDiscoveryFailed` | Failed to build the AWS platform client (e.g. Infrastructure name unavailable) or to discover Route Server endpoints (invalid Route Server ID, insufficient IAM permissions) |
+| `CloudEndpointsDiscovered` | `CloudCredentialsInvalid` | IRSA credentials not available or `sts:GetCallerIdentity` verification failed (check ServiceAccount annotation and IAM role trust policy) |
+| `CloudEndpointsDiscovered` | `CloudDiscoveryFailed` | Failed to build the AWS platform client (e.g. Infrastructure name unavailable) or to discover Route Server endpoints (invalid Route Server ID, insufficient IAM permissions) |
 | `FRRConfigurationApplied` | `ApplyFailed` | Failed to create/update one or more FRRConfigurations |
-| `AWSResourcesReconciled` | `AWSReconcileFailed` | Failed to reconcile Route Server peers or disable source/dest check |
+| `CloudResourcesReconciled` | `CloudReconcileFailed` | Failed to reconcile Route Server peers or disable source/dest check |
 
 > Phase 2 also uses `FRRNamespaceReady=False` with reason `WaitingForFRR` when the FRR namespace or pods are not yet available. This is **not** `Degraded` — the CR stays in `Configuring` and requeues every 10 seconds.
 
@@ -750,10 +752,10 @@ oc rollout restart deployment/openshift-cudn-bgp-routing-controller-manager -n o
    oc apply -f config/samples/networking_v1alpha1_cudnbgpconfig.yaml
    ```
 
-   **Without cloud integration:** create the CRs with your BGP router's ASN, neighbor addresses, and node selectors. Omit the `spec.aws` section and provide explicit `spec.bgp.availabilityZones`. See the commented-out section in `config/samples/networking_v1alpha1_cudnbgpconfig.yaml` for an example:
+   **Without cloud integration:** create the CRs with your BGP router's ASN, neighbor addresses, and node selectors. Set `platform: Manual`, omit the `spec.aws` section and provide explicit `spec.bgp.peerGroups`. See the commented-out section in `config/samples/networking_v1alpha1_cudnbgpconfig.yaml` for an example:
 
    ```bash
-   oc apply -f your-cudnbgpconfig.yaml    # no spec.aws, explicit availabilityZones
+   oc apply -f your-cudnbgpconfig.yaml    # platform: Manual, explicit peerGroups
    ```
 
    Then create a labeled namespace:
@@ -804,7 +806,7 @@ make undeploy
 | `make test-e2e <profile>` | E2E (BGP session verification + drift recovery), profile required | Cluster + external BGP peer |
 | `make test-e2e-aws <profile>` | AWS E2E (full reconciliation lifecycle), profile required | Cluster + AWS credentials |
 
-E2E tests read CR manifests from `test/e2e/manifests/<profile>/` and require a profile name. Shared E2E tests use CRs with explicit `availabilityZones` (no `spec.aws`); AWS E2E tests require `spec.aws`. To test your own cluster, create a profile directory with your CRs.
+E2E tests read CR manifests from `test/e2e/manifests/<profile>/` and require a profile name. Shared E2E tests use CRs with explicit `peerGroups` under `platform: Manual`; AWS E2E tests require `spec.aws`. To test your own cluster, create a profile directory with your CRs.
 
 For full details see [docs/test-strategy.md](docs/test-strategy.md).
 

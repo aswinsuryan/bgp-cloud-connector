@@ -26,9 +26,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
+	"github.com/openshift/bgp-cloud-connector/internal/platform"
 )
 
 func testScheme() *runtime.Scheme {
@@ -75,10 +77,11 @@ func TestEnsureFRRConfigurations_BFDProfile(t *testing.T) {
 
 	config := &networkingv1alpha1.CUDNBgpConfig{
 		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
+			Platform: networkingv1alpha1.PlatformManual,
 			BGP: networkingv1alpha1.BGPConfig{
 				LocalASN:          65001,
 				LivenessDetection: networkingv1alpha1.LivenessDetectionBFD,
-				AvailabilityZones: []networkingv1alpha1.AvailabilityZone{
+				PeerGroups: []networkingv1alpha1.PeerGroup{
 					{
 						NodeSelector: map[string]string{"bgp_router_subnet": "1"},
 						Neighbors: []networkingv1alpha1.BGPNeighbor{
@@ -97,7 +100,7 @@ func TestEnsureFRRConfigurations_BFDProfile(t *testing.T) {
 
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-az-1", Namespace: FRRNamespace}, obj); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, obj); err != nil {
 		t.Fatalf("FRRConfiguration not created: %v", err)
 	}
 
@@ -124,7 +127,7 @@ func TestEnsureFRRConfigurations_PrunesStale(t *testing.T) {
 			"apiVersion": "frrk8s.metallb.io/v1beta1",
 			"kind":       "FRRConfiguration",
 			"metadata": map[string]interface{}{
-				"name":      "cudn-bgp-az-3",
+				"name":      "cudn-bgp-3",
 				"namespace": FRRNamespace,
 				"labels":    map[string]interface{}{LabelManagedBy: LabelManagedByVal},
 			},
@@ -137,10 +140,11 @@ func TestEnsureFRRConfigurations_PrunesStale(t *testing.T) {
 
 	config := &networkingv1alpha1.CUDNBgpConfig{
 		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
+			Platform: networkingv1alpha1.PlatformManual,
 			BGP: networkingv1alpha1.BGPConfig{
 				LocalASN:          65001,
 				LivenessDetection: networkingv1alpha1.LivenessDetectionBGPKeepalive,
-				AvailabilityZones: []networkingv1alpha1.AvailabilityZone{
+				PeerGroups: []networkingv1alpha1.PeerGroup{
 					{
 						NodeSelector: map[string]string{"bgp_router_subnet": "1"},
 						Neighbors:    []networkingv1alpha1.BGPNeighbor{{Address: "10.0.1.47", RemoteASN: 64512}},
@@ -157,15 +161,15 @@ func TestEnsureFRRConfigurations_PrunesStale(t *testing.T) {
 
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(FRRConfigurationGVK)
-	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-az-1", Namespace: FRRNamespace}, obj); err != nil {
-		t.Error("cudn-bgp-az-1 should exist")
+	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, obj); err != nil {
+		t.Error("cudn-bgp-1 should exist")
 	}
 
 	staleObj := &unstructured.Unstructured{}
 	staleObj.SetGroupVersionKind(FRRConfigurationGVK)
-	err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-az-3", Namespace: FRRNamespace}, staleObj)
+	err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-3", Namespace: FRRNamespace}, staleObj)
 	if err == nil {
-		t.Error("cudn-bgp-az-3 should have been pruned")
+		t.Error("cudn-bgp-3 should have been pruned")
 	}
 }
 
@@ -194,10 +198,11 @@ func TestEnsureFRRConfigurations_KeepsUnmanagedResources(t *testing.T) {
 
 	config := &networkingv1alpha1.CUDNBgpConfig{
 		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
+			Platform: networkingv1alpha1.PlatformManual,
 			BGP: networkingv1alpha1.BGPConfig{
 				LocalASN:          65001,
 				LivenessDetection: networkingv1alpha1.LivenessDetectionBGPKeepalive,
-				AvailabilityZones: []networkingv1alpha1.AvailabilityZone{
+				PeerGroups: []networkingv1alpha1.PeerGroup{
 					{
 						NodeSelector: map[string]string{"bgp_router_subnet": "1"},
 						Neighbors:    []networkingv1alpha1.BGPNeighbor{{Address: "10.0.1.47", RemoteASN: 64512}},
@@ -216,5 +221,96 @@ func TestEnsureFRRConfigurations_KeepsUnmanagedResources(t *testing.T) {
 	obj.SetGroupVersionKind(FRRConfigurationGVK)
 	if err := c.Get(ctx, types.NamespacedName{Name: "user-custom-frr", Namespace: FRRNamespace}, obj); err != nil {
 		t.Error("user-owned FRRConfiguration should not be pruned")
+	}
+}
+
+// TestEnsureFRRConfigurationsFromGroups_SingleRegionalGroup covers the shape
+// this whole abstraction exists for: a cloud presenting one pair of addresses
+// for the region rather than a pair per zone.
+//
+// Every other test here renders the AWS shape, one group per zone carrying a
+// zone selector, so nothing else shows that a group selecting no nodes of its
+// own produces one FRRConfiguration covering every router node. That is what
+// GCP and Azure emit, and asserting it here is the difference between the
+// claim being tested and being taken on trust.
+func TestEnsureFRRConfigurationsFromGroups_SingleRegionalGroup(t *testing.T) {
+	s := testScheme()
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns).Build()
+	ctx := context.Background()
+
+	routerNodes := map[string]string{"networking.openshift.io/cudn-bgp-router": ""}
+	config := &networkingv1alpha1.CUDNBgpConfig{
+		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
+			Platform:           networkingv1alpha1.PlatformAWS,
+			BGP:                networkingv1alpha1.BGPConfig{LocalASN: 65001},
+			RouterNodeSelector: routerNodes,
+		},
+	}
+
+	// One group, no selector of its own: every router node peers with the
+	// same regional pair.
+	groups := []platform.PeerGroup{{
+		Key: "my-cluster-cudn-cr",
+		Neighbors: []platform.DiscoveredNeighbor{
+			{Address: "10.0.0.5", ASN: 65000},
+			{Address: "10.0.0.6", ASN: 65000},
+		},
+	}}
+
+	count, err := EnsureFRRConfigurationsFromGroups(ctx, c, config, groups)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("rendered %d configurations, want 1", count)
+	}
+
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.List(ctx, list, client.InNamespace(FRRNamespace)); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("got %d FRRConfigurations, want 1", len(list.Items))
+	}
+	obj := list.Items[0]
+	if obj.GetName() != "cudn-bgp-1" {
+		t.Errorf("name = %q, want cudn-bgp-1", obj.GetName())
+	}
+
+	// The group narrows nothing, so the selector is exactly the router node
+	// selector: every router node, not a zone's worth of them.
+	sel, found, err := unstructured.NestedStringMap(obj.Object, "spec", "nodeSelector", "matchLabels")
+	if err != nil || !found {
+		t.Fatalf("spec.nodeSelector.matchLabels not set (found=%t, err=%v)", found, err)
+	}
+	if len(sel) != len(routerNodes) {
+		t.Fatalf("selector = %v, want %v", sel, routerNodes)
+	}
+	for k, v := range routerNodes {
+		if sel[k] != v {
+			t.Errorf("selector[%q] = %q, want %q", k, sel[k], v)
+		}
+	}
+
+	routers, found, err := unstructured.NestedSlice(obj.Object, "spec", "bgp", "routers")
+	if err != nil || !found || len(routers) != 1 {
+		t.Fatalf("spec.bgp.routers not a single router (found=%t, err=%v)", found, err)
+	}
+	neighbors, found, err := unstructured.NestedSlice(routers[0].(map[string]interface{}), "neighbors")
+	if err != nil || !found {
+		t.Fatalf("neighbors not set (found=%t, err=%v)", found, err)
+	}
+	if len(neighbors) != 2 {
+		t.Fatalf("got %d neighbours, want 2", len(neighbors))
+	}
+	for i, want := range []string{"10.0.0.5", "10.0.0.6"} {
+		if got := neighbors[i].(map[string]interface{})["address"]; got != want {
+			t.Errorf("neighbour %d address = %v, want %s", i, got, want)
+		}
 	}
 }

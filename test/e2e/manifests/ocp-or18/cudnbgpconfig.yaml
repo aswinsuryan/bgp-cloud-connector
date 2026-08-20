@@ -3,10 +3,11 @@ kind: CUDNBgpConfig
 metadata:
   name: cluster
 spec:
+  platform: Manual
   bgp:
     localASN: 64502
     livenessDetection: bfd
-    availabilityZones:
+    peerGroups:
       - neighbors:
           - address: 100.72.142.4
             remoteASN: 64501
