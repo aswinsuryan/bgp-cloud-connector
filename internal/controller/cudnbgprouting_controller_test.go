@@ -143,6 +143,72 @@ func TestRoutingReconcile_FullReconcile(t *testing.T) {
 	}
 }
 
+func TestRoutingReconcile_RepeatedReconcile_DoesNotRewriteSharedRouteAdvertisements(t *testing.T) {
+	config := newReadyCUDNBgpConfig()
+	routingProd := newTestCUDNBgpRouting()
+	routingStaging := &networkingv1alpha1.CUDNBgpRouting{
+		ObjectMeta: metav1.ObjectMeta{Name: "staging"},
+		Spec: networkingv1alpha1.CUDNBgpRoutingSpec{
+			Network: networkingv1alpha1.NetworkConfig{Name: "staging", Subnets: []string{"10.200.0.0/16"}},
+		},
+	}
+	nsProd := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "app1", Labels: map[string]string{LabelPrimaryUDN: "", LabelCUDN: "prod"}},
+	}
+	nsStaging := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "app2", Labels: map[string]string{LabelPrimaryUDN: "", LabelCUDN: "staging"}},
+	}
+
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routingProd, routingStaging, config, nsProd, nsStaging).
+		WithStatusSubresource(routingProd, routingStaging, config).
+		Build()
+
+	r := &CUDNBgpRoutingReconciler{Client: c, Scheme: s}
+
+	prodReq := reconcile.Request{NamespacedName: types.NamespacedName{Name: "prod"}}
+	stagingReq := reconcile.Request{NamespacedName: types.NamespacedName{Name: "staging"}}
+
+	// Drive both CRs to Ready (finalizer-add + full pass each, matching
+	// TestRoutingReconcile_FullReconcile's two-call convention). This
+	// creates the single shared RouteAdvertisements object.
+	_, _ = r.Reconcile(context.Background(), prodReq)
+	if _, err := r.Reconcile(context.Background(), prodReq); err != nil {
+		t.Fatalf("prod reconcile error: %v", err)
+	}
+	_, _ = r.Reconcile(context.Background(), stagingReq)
+	if _, err := r.Reconcile(context.Background(), stagingReq); err != nil {
+		t.Fatalf("staging reconcile error: %v", err)
+	}
+
+	ra := &unstructured.Unstructured{}
+	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
+		t.Fatalf("RouteAdvertisements not created: %v", err)
+	}
+	resourceVersionAfterFirstPass := ra.GetResourceVersion()
+
+	// Reconcile both CRs again with no external state changed. This is the
+	// scenario that used to loop forever: mapRAToRouting fans the shared
+	// RA object's watch out to every CUDNBgpRouting CR, and each one used
+	// to rewrite RA unconditionally, re-triggering all the others again.
+	if _, err := r.Reconcile(context.Background(), prodReq); err != nil {
+		t.Fatalf("prod repeat reconcile error: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), stagingReq); err != nil {
+		t.Fatalf("staging repeat reconcile error: %v", err)
+	}
+
+	if err := c.Get(context.Background(), types.NamespacedName{Name: RouteAdvertisementName}, ra); err != nil {
+		t.Fatalf("get RouteAdvertisements after repeat reconciles: %v", err)
+	}
+	if ra.GetResourceVersion() != resourceVersionAfterFirstPass {
+		t.Fatalf("expected no rewrite of shared RouteAdvertisements across repeated reconciles of multiple CRs, resourceVersion changed from %q to %q",
+			resourceVersionAfterFirstPass, ra.GetResourceVersion())
+	}
+}
+
 func TestRoutingReconcile_NoNamespace(t *testing.T) {
 	routing := newTestCUDNBgpRouting()
 	routing.Finalizers = []string{RoutingFinalizerName}

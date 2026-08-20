@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -245,5 +246,61 @@ func createOrUpdate(ctx context.Context, c client.Client, obj *unstructured.Unst
 	}
 
 	obj.SetResourceVersion(existing.GetResourceVersion())
+	// Both controllers watch what they write here, so skip the write when nothing we manage changed to avoid re-triggering reconcile.
+	if specEqual(existing, obj) && labelsSatisfied(existing.GetLabels(), obj.GetLabels()) {
+		return nil
+	}
+	// The write replaces metadata wholesale, so carry forward anything we don't manage ourselves (e.g. a foreign label, or ovn-kubernetes' own finalizer/annotations on a CUDN).
+	obj.SetLabels(mergeLabels(existing.GetLabels(), obj.GetLabels()))
+	obj.SetAnnotations(mergeLabels(existing.GetAnnotations(), obj.GetAnnotations()))
 	return c.Update(ctx, obj)
+}
+
+// specEqual reports whether every field we set in desired already has that
+// value in existing. Fields we never set are ignored: the API server adds
+// its own (e.g. FRRConfiguration defaults neighbors[].dualStackAddressFamily),
+// and comparing those exactly would never match, rewriting the object forever.
+func specEqual(existing, desired *unstructured.Unstructured) bool {
+	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
+	desiredSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
+	return specSatisfied(existingSpec, desiredSpec)
+}
+
+func specSatisfied(existing, desired interface{}) bool {
+	switch want := desired.(type) {
+	case map[string]interface{}:
+		have, ok := existing.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		for k, v := range want {
+			if !specSatisfied(have[k], v) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		have, ok := existing.([]interface{})
+		if !ok || len(have) != len(want) {
+			return false
+		}
+		for i := range want {
+			if !specSatisfied(have[i], want[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return apiequality.Semantic.DeepEqual(existing, desired)
+	}
+}
+
+// labelsSatisfied checks only that desired labels are present; extra labels already on existing (e.g. from another controller) are left alone.
+func labelsSatisfied(existing, desired map[string]string) bool {
+	for k, v := range desired {
+		if existing[k] != v {
+			return false
+		}
+	}
+	return true
 }

@@ -189,18 +189,21 @@ func TestConfigReconcile_DeleteBlockedByRouting(t *testing.T) {
 // --- Phase 4: Controller AWS Integration (Mocked Platform) ---
 
 type mockPlatform struct {
-	discoverResult       *platform.DiscoveryResult
-	discoverErr          error
-	discoverCalled       bool
-	reconcileNodesCalled bool
-	reconcileNodesArgs   []platform.RouterNode
-	reconcileNodesErr    error
-	cleanupCalled        bool
-	cleanupErr           error
+	discoverResult          *platform.DiscoveryResult
+	discoverErr             error
+	discoverCalled          bool
+	discoverCallCount       int
+	reconcileNodesCalled    bool
+	reconcileNodesCallCount int
+	reconcileNodesArgs      []platform.RouterNode
+	reconcileNodesErr       error
+	cleanupCalled           bool
+	cleanupErr              error
 }
 
 func (m *mockPlatform) DiscoverEndpoints(_ context.Context) (*platform.DiscoveryResult, error) {
 	m.discoverCalled = true
+	m.discoverCallCount++
 	if m.discoverErr != nil {
 		return nil, m.discoverErr
 	}
@@ -220,6 +223,7 @@ func (m *mockPlatform) DiscoverEndpoints(_ context.Context) (*platform.Discovery
 
 func (m *mockPlatform) ReconcileNodes(_ context.Context, nodes []platform.RouterNode) error {
 	m.reconcileNodesCalled = true
+	m.reconcileNodesCallCount++
 	m.reconcileNodesArgs = nodes
 	return m.reconcileNodesErr
 }
@@ -349,6 +353,84 @@ func TestConfigReconcile_AWSFullReconcile(t *testing.T) {
 	frrConfig.SetGroupVersionKind(FRRConfigurationGVK)
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, frrConfig); err != nil {
 		t.Fatalf("FRRConfiguration not created from discovery: %v", err)
+	}
+}
+
+func TestConfigReconcile_RepeatedReconcile_DoesNotRewriteFRRConfiguration(t *testing.T) {
+	mock := &mockPlatform{}
+	config := newTestCUDNBgpConfigWithAWS()
+	s := configTestScheme()
+
+	network := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operator.openshift.io/v1",
+			"kind":       "Network",
+			"metadata":   map[string]interface{}{"name": "cluster"},
+			"spec":       map[string]interface{}{},
+		},
+	}
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	node := newRouterNode("node-1", "10.0.1.10", "us-east-1a", "aws:///us-east-1a/i-001")
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, network, frrNS, frrPod, node).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+			return mock, nil
+		},
+	}
+
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}
+
+	// First reconcile adds finalizer; second does the full 5-phase reconcile
+	// (matches the two-call convention used by TestConfigReconcile_AWSFullReconcile).
+	_, _ = r.Reconcile(context.Background(), req)
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
+
+	frrConfig := &unstructured.Unstructured{}
+	frrConfig.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, frrConfig); err != nil {
+		t.Fatalf("FRRConfiguration not created from discovery: %v", err)
+	}
+	resourceVersionAfterFirstPass := frrConfig.GetResourceVersion()
+	discoverCallsAfterFirstPass := mock.discoverCallCount
+	reconcileNodesCallsAfterFirstPass := mock.reconcileNodesCallCount
+
+	// Reconcile again with no external state changed. This is the scenario
+	// that used to loop forever: the FRRConfiguration watch re-enqueues this
+	// same request every time createOrUpdate rewrites the object.
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("second reconcile error: %v", err)
+	}
+
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, frrConfig); err != nil {
+		t.Fatalf("get FRRConfiguration after repeat reconcile: %v", err)
+	}
+	if frrConfig.GetResourceVersion() != resourceVersionAfterFirstPass {
+		t.Fatalf("expected no rewrite of FRRConfiguration on repeated reconcile, resourceVersion changed from %q to %q",
+			resourceVersionAfterFirstPass, frrConfig.GetResourceVersion())
+	}
+
+	// AWS discovery and node reconciliation are expected to run on every
+	// pass (they are not gated by equality) — only the object write should
+	// stop. Assert this explicitly so the test's intent can't be misread.
+	if mock.discoverCallCount != discoverCallsAfterFirstPass+1 {
+		t.Errorf("expected DiscoverEndpoints to still run every reconcile, got %d calls after repeat (was %d)",
+			mock.discoverCallCount, discoverCallsAfterFirstPass)
+	}
+	if mock.reconcileNodesCallCount != reconcileNodesCallsAfterFirstPass+1 {
+		t.Errorf("expected ReconcileNodes to still run every reconcile, got %d calls after repeat (was %d)",
+			mock.reconcileNodesCallCount, reconcileNodesCallsAfterFirstPass)
 	}
 }
 
