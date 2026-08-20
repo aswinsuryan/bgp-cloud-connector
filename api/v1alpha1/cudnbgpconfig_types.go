@@ -67,6 +67,7 @@ const (
 	ConditionCloudEndpointsDiscovered = "CloudEndpointsDiscovered"
 	ConditionFRRConfigurationApplied  = "FRRConfigurationApplied"
 	ConditionCloudResourcesReconciled = "CloudResourcesReconciled"
+	ConditionCompleteNodeInventory    = "CompleteNodeInventory"
 )
 
 type BGPNeighbor struct {
