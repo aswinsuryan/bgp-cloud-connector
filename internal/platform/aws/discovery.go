@@ -52,6 +52,9 @@ func (p *Platform) DiscoverEndpoints(ctx context.Context) (*platform.DiscoveryRe
 			address := aws.ToString(ep.EniAddress)
 			subnetID := aws.ToString(ep.SubnetId)
 			az := subnetAZMap[subnetID]
+			if az == "" {
+				return nil, fmt.Errorf("endpoint %s: no availability zone for subnet %q", epID, subnetID)
+			}
 
 			logger.Info("discovered endpoint", "endpointID", epID, "az", az, "address", address)
 
