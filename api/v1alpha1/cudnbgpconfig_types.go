@@ -53,7 +53,7 @@ const (
 	// PlatformAWS discovers BGP neighbours from VPC Route Server endpoints and
 	// reconciles Route Server peers and source/dest check. Requires spec.aws.
 	PlatformAWS PlatformType = "AWS"
-	// PlatformGCP discovers BGP neighbours from a Cloud Router and reconciles
+	// PlatformGCP discovers BGP neighbors from a Cloud Router and reconciles
 	// NCC spokes, Cloud Router peers and GCE instance attributes. Requires
 	// spec.gcp.
 	PlatformGCP PlatformType = "GCP"
@@ -127,13 +127,13 @@ type GCPConfig struct {
 	// +kubebuilder:validation:MinLength=1
 	Region string `json:"region"`
 	// CloudRouterName is the Cloud Router the router nodes peer with; its
-	// interface addresses become the BGP neighbours. It must not be the
+	// interface addresses become the BGP neighbors. It must not be the
 	// installer's Cloud NAT router, which has no interfaces and carries the
 	// cluster's egress.
 	// +kubebuilder:validation:MinLength=1
 	CloudRouterName string    `json:"cloudRouterName"`
 	NCC             NCCConfig `json:"ncc"`
-	// EnableNestedVirtualization turns on nested virtualisation on the router
+	// EnableNestedVirtualization turns on nested virtualization on the router
 	// instances, which KubeVirt needs. Enabling it restarts the instance.
 	// +optional
 	// +kubebuilder:default=true

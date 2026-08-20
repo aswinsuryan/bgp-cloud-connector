@@ -316,7 +316,7 @@ func TestEnsureFRRConfigurationsFromGroups_SingleRegionalGroup(t *testing.T) {
 }
 
 // TestEnsureFRRConfigurationsFromGroups_RawFRRConfig covers a platform whose
-// peering needs FRR directives the structured neighbour API cannot express.
+// peering needs FRR directives the structured neighbor API cannot express.
 //
 // GCP is the case: a Cloud Router interface is not on the node's link in the
 // way FRR expects, so the session needs disable-connected-check, for which

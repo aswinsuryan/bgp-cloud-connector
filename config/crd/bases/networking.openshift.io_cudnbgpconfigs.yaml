@@ -133,7 +133,7 @@ spec:
                   cloudRouterName:
                     description: |-
                       CloudRouterName is the Cloud Router the router nodes peer with; its
-                      interface addresses become the BGP neighbours. It must not be the
+                      interface addresses become the BGP neighbors. It must not be the
                       installer's Cloud NAT router, which has no interfaces and carries the
                       cluster's egress.
                     minLength: 1
@@ -141,7 +141,7 @@ spec:
                   enableNestedVirtualization:
                     default: true
                     description: |-
-                      EnableNestedVirtualization turns on nested virtualisation on the router
+                      EnableNestedVirtualization turns on nested virtualization on the router
                       instances, which KubeVirt needs. Enabling it restarts the instance.
                     type: boolean
                   ncc:

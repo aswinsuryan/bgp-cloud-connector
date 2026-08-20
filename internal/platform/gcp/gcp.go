@@ -78,9 +78,9 @@ func (p *Platform) DiscoverEndpoints(ctx context.Context) (*platform.DiscoveryRe
 	return &platform.DiscoveryResult{PeerGroups: []platform.PeerGroup{group}}, nil
 }
 
-// rawFRRConfig renders the FRR directives the structured neighbour API cannot
+// rawFRRConfig renders the FRR directives the structured neighbor API cannot
 // express. A Cloud Router interface is not on the node's link in the way FRR
-// expects, so without disable-connected-check it rejects the neighbour as
+// expects, so without disable-connected-check it rejects the neighbor as
 // unreachable and no session comes up.
 func rawFRRConfig(localASN int64, interfaceIPs []string) string {
 	lines := []string{"      router bgp " + strconv.FormatInt(localASN, 10)}
@@ -112,10 +112,10 @@ func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNo
 		if p.cfg.NestedVirt {
 			changed, err := p.compute.EnsureNestedVirtualization(ctx, node)
 			if err != nil {
-				return fmt.Errorf("enabling nested virtualisation on %q: %w", node.Name, err)
+				return fmt.Errorf("enabling nested virtualization on %q: %w", node.Name, err)
 			}
 			if changed {
-				logger.Info("enabled nested virtualisation", "instance", node.Name)
+				logger.Info("enabled nested virtualization", "instance", node.Name)
 			}
 		}
 	}
