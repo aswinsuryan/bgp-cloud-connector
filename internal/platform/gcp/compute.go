@@ -2,6 +2,8 @@ package gcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -208,12 +210,40 @@ func (c *computeClient) waitRegionOp(ctx context.Context, op *compute.Operation)
 // maxPeerNameLength is the GCE limit on a Cloud Router peer name.
 const maxPeerNameLength = 63
 
+// maxPeerPrefixLength bounds the ownership prefix, and peerDigestLength is how
+// much of a SHA-256 is kept wherever something has to be abbreviated to fit.
+//
+// The bound sits well above an OpenShift infrastructure name plus "-bgp", so
+// in practice no prefix is abbreviated at all. It exists so that the limit is
+// enforced on the prefix alone, before any address is appended: a prefix
+// trimmed to fit a particular address is a prefix isOurPeer cannot look for.
+const (
+	maxPeerPrefixLength = 34
+	peerDigestLength    = 8
+)
+
 // peerPrefix is the ownership signal. A Cloud Router peer is a field inside
 // the router resource and cannot carry labels, so unlike the AWS tag this is
 // the only marker available, and it is why nothing here touches a peer whose
 // name does not carry it.
+//
+// Every name is built from this and isOurPeer looks for exactly this, so the
+// two cannot fall out of step. Abbreviating happens here or not at all.
 func peerPrefix(clusterName string) string {
-	return clusterName + "-bgp"
+	prefix := clusterName + "-bgp"
+	if len(prefix) <= maxPeerPrefixLength {
+		return prefix
+	}
+	// Cutting alone would give two clusters sharing their leading characters
+	// the same prefix, and each would then treat the other's peers as its own.
+	// What is kept of the name is qualified by a digest of the whole of it.
+	return prefix[:maxPeerPrefixLength-peerDigestLength-1] + "-" + peerDigest(clusterName)
+}
+
+// peerDigest is a short, stable stand-in for a value too long to spell out.
+func peerDigest(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:peerDigestLength]
 }
 
 // PeerName is the Cloud Router peer name for a node address and router
@@ -224,12 +254,15 @@ func peerPrefix(clusterName string) string {
 // and since a patch replaces the whole list that is a delete and a create:
 // every surviving node's session drops because an unrelated node went away.
 func PeerName(clusterName, ipAddress string, ifaceIdx int) string {
-	suffix := fmt.Sprintf("-%s-%d", strings.ReplaceAll(ipAddress, ".", "-"), ifaceIdx)
 	prefix := peerPrefix(clusterName)
-	if len(prefix)+len(suffix) > maxPeerNameLength {
-		prefix = prefix[:maxPeerNameLength-len(suffix)]
+
+	name := fmt.Sprintf("%s-%s-%d", prefix, strings.ReplaceAll(ipAddress, ".", "-"), ifaceIdx)
+	if len(name) <= maxPeerNameLength {
+		return name
 	}
-	return prefix + suffix
+	// The prefix is what marks the peer as ours, so when something has to go
+	// it is the address, which a digest still tells apart node by node.
+	return fmt.Sprintf("%s-%s-%d", prefix, peerDigest(ipAddress), ifaceIdx)
 }
 
 // isOurPeer reports whether a peer name was generated for this cluster. The

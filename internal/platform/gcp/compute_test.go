@@ -1,6 +1,7 @@
 package gcp
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/api/compute/v1"
@@ -99,10 +100,39 @@ func TestIsOurPeer_DoesNotClaimALongerClusterName(t *testing.T) {
 
 // TestPeerName_WithinGCELimit covers a long infrastructure name, which is
 // where the 63 character limit bites.
+//
+// Fitting the limit is only half of it. Whatever the name gives up to fit, it
+// has to stay recognisable to isOurPeer, or the cluster stops recognising its
+// own peers: mergePeers holds on to them as another cluster's and Cleanup
+// leaves them on the router.
 func TestPeerName_WithinGCELimit(t *testing.T) {
-	name := PeerName("a-very-long-openshift-infrastructure-name-with-suffix-abcde", "10.128.128.128", 1)
+	const cluster = "a-very-long-openshift-infrastructure-name-with-suffix-abcde"
+
+	name := PeerName(cluster, "10.128.128.128", 1)
 	if len(name) > maxPeerNameLength {
 		t.Errorf("peer name is %d characters, over the %d limit: %q", len(name), maxPeerNameLength, name)
+	}
+	if !isOurPeer(name, cluster) {
+		t.Errorf("%q is not recognised as belonging to the cluster that built it", name)
+	}
+}
+
+// TestPeerName_AbbreviatedPrefixesDoNotCollide covers two clusters whose names
+// are too long to carry whole and share everything but their ending.
+//
+// Abbreviating by cutting would give both the same prefix, and the prefix is
+// the only ownership marker a Cloud Router peer can carry, so each cluster
+// would treat the other's peers as its own and delete them.
+func TestPeerName_AbbreviatedPrefixesDoNotCollide(t *testing.T) {
+	shared := strings.Repeat("x", 50)
+	alpha, beta := shared+"-alpha", shared+"-beta"
+
+	name := PeerName(alpha, "10.0.1.4", 0)
+	if !isOurPeer(name, alpha) {
+		t.Errorf("%q is not recognised by the cluster that built it", name)
+	}
+	if isOurPeer(name, beta) {
+		t.Errorf("%q built for %q was claimed by %q", name, alpha, beta)
 	}
 }
 
