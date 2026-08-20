@@ -88,6 +88,16 @@ func newPlatform(ctx context.Context, cfg Config, ec2Override ec2API, stsOverrid
 func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNode) error {
 	logger := log.FromContext(ctx)
 
+	// No router nodes is a gap in the selector, not an instruction to release
+	// the peers. Reconciling it makes every managed peer stale at once, so a
+	// label being moved during a rollout would drop BGP for the whole cluster.
+	// Cleanup releases the peers, and it runs on deletion, where the intent is
+	// unambiguous.
+	if len(nodes) == 0 {
+		logger.Info("no router nodes matched; leaving route server peers as they are")
+		return nil
+	}
+
 	if err := p.reconcileRouteServerPeers(ctx, nodes); err != nil {
 		return fmt.Errorf("reconciling route server peers: %w", err)
 	}
