@@ -1,6 +1,7 @@
 package gcp
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -181,5 +182,49 @@ func TestBuildPeerSet_SeesApplianceDrift(t *testing.T) {
 	if buildPeerSet(before).Equal(buildPeerSet(after)) {
 		t.Errorf("peer sets compare equal across an instance replacement, so no patch would be sent:\n"+
 			" before: %q\n after:  %q", before[0].RouterApplianceInstance, after[0].RouterApplianceInstance)
+	}
+}
+
+// TestPeerName_IsAValidGCEName covers a dual-stack node, whose first internal
+// address the controller reports may be IPv6.
+//
+// A GCE resource name accepts lowercase letters, digits and dashes, and must
+// start with a letter. An address carries separators that are none of those,
+// so a name built by substituting only the IPv4 dot is rejected by the API and
+// no peer is created at all.
+func TestPeerName_IsAValidGCEName(t *testing.T) {
+	valid := regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+
+	for _, address := range []string{
+		"10.0.128.2",
+		"2a00:8a00:4000:780::4",
+		"fd01:0:0:1::4",
+		"2001:DB8:85A3:8D3:1319:8A2E:370:7348",
+	} {
+		name := PeerName("cluster-abcde", address, 0)
+		if !valid.MatchString(name) {
+			t.Errorf("peer name for %q is not a valid GCE name: %q", address, name)
+		}
+		if len(name) > maxPeerNameLength {
+			t.Errorf("peer name for %q is %d characters, over the %d limit: %q",
+				address, len(name), maxPeerNameLength, name)
+		}
+	}
+}
+
+// TestPeerName_DistinguishesAddresses guards the substitution from mapping two
+// different node addresses onto one name, which would leave the second node
+// without a peer of its own.
+func TestPeerName_DistinguishesAddresses(t *testing.T) {
+	seen := map[string]string{}
+	for _, address := range []string{
+		"10.0.128.2", "10.0.128.3",
+		"fd01:0:0:1::4", "fd01:0:0:1::5", "fd01:0:0:2::4",
+	} {
+		name := PeerName("cluster-abcde", address, 0)
+		if other, dup := seen[name]; dup {
+			t.Errorf("%q and %q both produce peer name %q", other, address, name)
+		}
+		seen[name] = address
 	}
 }

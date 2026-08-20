@@ -256,13 +256,34 @@ func peerDigest(s string) string {
 func PeerName(clusterName, ipAddress string, ifaceIdx int) string {
 	prefix := peerPrefix(clusterName)
 
-	name := fmt.Sprintf("%s-%s-%d", prefix, strings.ReplaceAll(ipAddress, ".", "-"), ifaceIdx)
+	name := fmt.Sprintf("%s-%s-%d", prefix, addressToken(ipAddress), ifaceIdx)
 	if len(name) <= maxPeerNameLength {
 		return name
 	}
 	// The prefix is what marks the peer as ours, so when something has to go
 	// it is the address, which a digest still tells apart node by node.
 	return fmt.Sprintf("%s-%s-%d", prefix, peerDigest(ipAddress), ifaceIdx)
+}
+
+// addressToken renders a node address as part of a GCE name, which accepts
+// only lowercase letters, digits and dashes.
+//
+// Substituting every separator rather than just the IPv4 dot is what makes an
+// IPv6 address usable here: a colon is not a name character, and a name
+// carrying one is rejected outright, so a dual-stack node whose first internal
+// address is IPv6 got no peer at all. Every separator maps to the same dash,
+// which is safe because an address cannot mix the two families.
+func addressToken(ipAddress string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r - 'A' + 'a'
+		default:
+			return '-'
+		}
+	}, ipAddress)
 }
 
 // isOurPeer reports whether a peer name was generated for this cluster. The
