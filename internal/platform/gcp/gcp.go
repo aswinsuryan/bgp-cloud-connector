@@ -95,6 +95,16 @@ func rawFRRConfig(localASN int64, interfaceIPs []string) string {
 func (p *Platform) ReconcileNodes(ctx context.Context, nodes []platform.RouterNode) error {
 	logger := log.FromContext(ctx)
 
+	// No router nodes is a gap in the selector, not an instruction to release
+	// the estate. Reconciling it deletes every spoke and writes a peer list
+	// with none of ours in it, so a label being moved during a rollout would
+	// drop BGP for the whole cluster. Cleanup releases these resources, and it
+	// runs on deletion, where the intent is unambiguous.
+	if len(nodes) == 0 {
+		logger.Info("no router nodes matched; leaving Cloud Router peers and NCC spokes as they are")
+		return nil
+	}
+
 	routerNodes, err := toRouterNodes(nodes)
 	if err != nil {
 		return err
