@@ -3,6 +3,7 @@ package gcp
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,29 +60,8 @@ func (n *nccClient) ReconcileSpoke(ctx context.Context, spokeName, hubName strin
 		return false, err
 	}
 
-	current := make(map[string]struct{})
-	if spoke.LinkedRouterApplianceInstances != nil {
-		for _, inst := range spoke.LinkedRouterApplianceInstances.Instances {
-			if inst != nil && inst.VirtualMachine != "" {
-				current[inst.VirtualMachine] = struct{}{}
-			}
-		}
-	}
-	desired := make(map[string]RouterNode)
-	for _, node := range nodes {
-		desired[node.SelfLink] = node
-	}
-	if len(current) == len(desired) {
-		match := true
-		for vm := range current {
-			if _, ok := desired[vm]; !ok {
-				match = false
-				break
-			}
-		}
-		if match {
-			return false, nil
-		}
+	if spokeMatches(spoke, nodes, siteToSite) {
+		return false, nil
 	}
 
 	insts := applianceInstancesFromNodes(nodes)
@@ -90,7 +70,7 @@ func (n *nccClient) ReconcileSpoke(ctx context.Context, spokeName, hubName strin
 		Instances:              insts,
 	}
 	op, err := n.svc.Projects.Locations.Spokes.Patch(name, spoke).
-		UpdateMask("linkedRouterApplianceInstances.instances").
+		UpdateMask("linkedRouterApplianceInstances.instances,linkedRouterApplianceInstances.siteToSiteDataTransfer").
 		Context(ctx).
 		Do()
 	if err != nil {
@@ -100,6 +80,37 @@ func (n *nccClient) ReconcileSpoke(ctx context.Context, spokeName, hubName strin
 		return false, err
 	}
 	return true, nil
+}
+
+// spokeMatches reports whether the spoke already describes what is wanted of
+// it, so that a pass with nothing to do sends no patch.
+//
+// All three of the things a spoke carries are compared: which instances belong
+// to it, the address each is reached on, and whether site-to-site data
+// transfer is on. Comparing the instances alone left the other two unchecked,
+// so a node keeping its instance while changing address, and
+// spec.gcp.ncc.siteToSiteDataTransfer being flipped, both read as nothing to
+// do and were never applied.
+func spokeMatches(spoke *networkconnectivity.Spoke, nodes []RouterNode, siteToSite bool) bool {
+	linked := spoke.LinkedRouterApplianceInstances
+	if linked == nil {
+		return len(nodes) == 0 && !siteToSite
+	}
+	if linked.SiteToSiteDataTransfer != siteToSite {
+		return false
+	}
+
+	current := make(map[string]string, len(linked.Instances))
+	for _, inst := range linked.Instances {
+		if inst != nil && inst.VirtualMachine != "" {
+			current[inst.VirtualMachine] = inst.IpAddress
+		}
+	}
+	desired := make(map[string]string, len(nodes))
+	for _, node := range nodes {
+		desired[node.SelfLink] = node.IPAddress
+	}
+	return maps.Equal(current, desired)
 }
 
 func (n *nccClient) createSpoke(ctx context.Context, spokeID, hub string, nodes []RouterNode, siteToSite bool) (bool, error) {
