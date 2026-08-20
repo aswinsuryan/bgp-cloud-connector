@@ -105,3 +105,51 @@ func TestPeerName_WithinGCELimit(t *testing.T) {
 		t.Errorf("peer name is %d characters, over the %d limit: %q", len(name), maxPeerNameLength, name)
 	}
 }
+
+// TestBuildPeerSet_SeesInterfaceDrift covers a Cloud Router interface being
+// rebuilt under a peer that keeps its name.
+//
+// The name is keyed on the node address and the interface index, so renaming
+// or re-addressing an interface leaves every name unchanged. If the comparison
+// key does not carry what the interface contributes, the desired set equals the
+// current one, no patch is sent, and the peer keeps pointing at an interface
+// that is gone.
+func TestBuildPeerSet_SeesInterfaceDrift(t *testing.T) {
+	n := nodes("10.0.1.4")
+
+	before := desiredPeers("cluster", n, topology(), 65001)
+	rebuilt := &CloudRouterTopology{
+		CloudRouterASN: 65000,
+		InterfaceNames: []string{"if0-rebuilt", "if1-rebuilt"},
+		InterfaceIPs:   []string{"10.0.0.8", "10.0.0.9"},
+	}
+	after := desiredPeers("cluster", n, rebuilt, 65001)
+
+	if before[0].Name != after[0].Name {
+		t.Fatalf("peer names differ (%q vs %q); this test is meaningless unless they match",
+			before[0].Name, after[0].Name)
+	}
+	if buildPeerSet(before).Equal(buildPeerSet(after)) {
+		t.Errorf("peer sets compare equal across an interface rebuild, so no patch would be sent:\n"+
+			" before: interface %q at %q\n after:  interface %q at %q",
+			before[0].InterfaceName, before[0].IpAddress, after[0].InterfaceName, after[0].IpAddress)
+	}
+}
+
+// TestBuildPeerSet_SeesApplianceDrift covers a node keeping its address while
+// its instance is replaced, which reissues the self link the peer names.
+func TestBuildPeerSet_SeesApplianceDrift(t *testing.T) {
+	before := desiredPeers("cluster", nodes("10.0.1.4"), topology(), 65001)
+
+	replaced := []RouterNode{{
+		Name:      "a-worker",
+		IPAddress: "10.0.1.4",
+		SelfLink:  SelfLink("proj", "us-east1-b", "a-worker-rebuilt"),
+	}}
+	after := desiredPeers("cluster", replaced, topology(), 65001)
+
+	if buildPeerSet(before).Equal(buildPeerSet(after)) {
+		t.Errorf("peer sets compare equal across an instance replacement, so no patch would be sent:\n"+
+			" before: %q\n after:  %q", before[0].RouterApplianceInstance, after[0].RouterApplianceInstance)
+	}
+}

@@ -282,9 +282,18 @@ func sortPeers(peers []*compute.RouterBgpPeer) {
 	sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
 }
 
+// peerKey carries every field desiredPeers writes, so that the comparison
+// answers the question ReconcilePeers is really asking: would writing the
+// desired list change the router?
+//
+// The name is keyed on the node address and the interface index, so an
+// interface rebuilt under the same index, or an instance reissued at the same
+// address, produces an identical name. Keying only on the name and the node
+// end of the session would call those unchanged and send no patch, leaving the
+// peer pointing at an interface or an instance that no longer exists.
 type peerKey struct {
-	name, peerIP string
-	peerASN      int64
+	name, ifaceName, peerIP, ifaceIP, applianceInstance string
+	peerASN                                             int64
 }
 
 type peerSet map[peerKey]struct{}
@@ -295,7 +304,14 @@ func buildPeerSet(peers []*compute.RouterBgpPeer) peerSet {
 		if p == nil {
 			continue
 		}
-		s[peerKey{p.Name, p.PeerIpAddress, p.PeerAsn}] = struct{}{}
+		s[peerKey{
+			name:              p.Name,
+			ifaceName:         p.InterfaceName,
+			peerIP:            p.PeerIpAddress,
+			ifaceIP:           p.IpAddress,
+			applianceInstance: p.RouterApplianceInstance,
+			peerASN:           p.PeerAsn,
+		}] = struct{}{}
 	}
 	return s
 }
