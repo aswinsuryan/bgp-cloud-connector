@@ -123,6 +123,11 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: manifests generate fmt vet ## Run platform-independent unit tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./internal/controller/... ./api/... ./cmd/... -coverprofile cover.out
+	$(MAKE) test-scripts
+
+.PHONY: test-scripts
+test-scripts: ## Run unit tests for the shell under hack/.
+	./hack/ci-e2e-aws-test.sh
 
 .PHONY: test-aws
 test-aws: ## Run AWS platform unit tests (mocked, no credentials needed).
