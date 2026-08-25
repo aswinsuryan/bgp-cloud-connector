@@ -7,6 +7,7 @@ approvers:
   - daxelrod-rh
   - knobunc
   - mffiedler
+  - jpinsonneau
 reviewers:
   - alebedev87
   - frobware
@@ -14,4 +15,5 @@ reviewers:
   - gavrielg1
   - aswinsuryan
   - daxelrod-rh
+  - jpinsonneau
 component: Networking
