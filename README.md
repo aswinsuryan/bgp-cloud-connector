@@ -684,8 +684,8 @@ oc get cudnbgprouting cudn1 -o jsonpath='{.status.conditions}' | jq .
 ### Clone the repo
 
 ```bash
-git clone https://github.com/jingczhang/rosa-bgp-operator.git
-cd rosa-bgp-operator
+git clone https://github.com/openshift/bgp-cloud-connector.git
+cd bgp-cloud-connector
 ```
 
 ### Deploy and test
@@ -719,7 +719,7 @@ oc wait route/default-route -n openshift-image-registry --for=jsonpath='{.status
 ```bash
 REGISTRY=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
 IMG=$REGISTRY/openshift-cudn-bgp-routing/operator:dev
-make docker-build CONTAINER_TOOL=podman IMG=$IMG
+make image-build CONTAINER_TOOL=podman IMG=$IMG
 ```
 
 3. Push the image and deploy:
@@ -729,15 +729,15 @@ oc create namespace openshift-cudn-bgp-routing --dry-run=client -o yaml | oc app
 oc create sa registry-push -n openshift-cudn-bgp-routing 2>/dev/null
 oc adm policy add-role-to-user registry-editor -z registry-push -n openshift-cudn-bgp-routing
 podman login $REGISTRY --tls-verify=false -u unused -p $(oc create token registry-push -n openshift-cudn-bgp-routing)
-make docker-push CONTAINER_TOOL=podman IMG=$IMG
+make image-push CONTAINER_TOOL=podman IMG=$IMG
 make deploy IMG=image-registry.openshift-image-registry.svc:5000/openshift-cudn-bgp-routing/operator:dev
 ```
 
 4. Re-deploy after code changes (rebuild, push, and restart):
 
 ```bash
-make docker-build CONTAINER_TOOL=podman IMG=$IMG
-make docker-push CONTAINER_TOOL=podman IMG=$IMG
+make image-build CONTAINER_TOOL=podman IMG=$IMG
+make image-push CONTAINER_TOOL=podman IMG=$IMG
 oc patch deployment openshift-cudn-bgp-routing-controller-manager -n openshift-cudn-bgp-routing \
   -p '{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"Always"}]}}}}'
 oc rollout restart deployment/openshift-cudn-bgp-routing-controller-manager -n openshift-cudn-bgp-routing

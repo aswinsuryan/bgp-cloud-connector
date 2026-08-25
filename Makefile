@@ -55,6 +55,15 @@ endif
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
 
+# Go architecture and multi-arch image targets.
+# Locally defaults to amd64; CI overrides to "amd64 arm64 ppc64le s390x".
+GOARCH ?= amd64
+MULTIARCH_TARGETS ?= amd64
+
+ifeq ("$(CONTAINER_TOOL)","docker")
+EXTRA_BUILD_FLAGS ?= --provenance=false
+endif
+
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
@@ -169,7 +178,7 @@ set-version: ## Sync VERSION file to all Containerfile labels.
 
 .PHONY: build-operator
 build-operator: ## Build manager binary, no additional checks or code generation.
-	go build -tags strictfipsruntime -o bin/manager cmd/main.go
+	GOARCH=${GOARCH} go build -tags strictfipsruntime -o bin/manager cmd/main.go
 
 .PHONY: build
 build: manifests generate fmt vet build-operator ## Build manager binary.
@@ -178,33 +187,55 @@ build: manifests generate fmt vet build-operator ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
-# If you wish to build the manager image targeting other platforms you can use the --platform flag.
-# (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
-# More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-.PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+##@ Images
 
-.PHONY: docker-push
-docker-push: ## Push docker image with the manager.
-	$(CONTAINER_TOOL) push ${IMG}
+# Build a single arch target image: $(call build_target,<arch>)
+define build_target
+	echo 'building image for arch $(1)'; \
+	if [ "$(CONTAINER_TOOL)" = "docker" ]; then \
+		$(CONTAINER_TOOL) buildx build --load --platform=linux/$(1) --build-arg TARGETARCH=$(1) ${EXTRA_BUILD_FLAGS} -t ${IMG}-$(1) -f Dockerfile .; \
+	else \
+		$(CONTAINER_TOOL) build --platform=linux/$(1) --build-arg TARGETARCH=$(1) ${EXTRA_BUILD_FLAGS} -t ${IMG}-$(1) -f Dockerfile .; \
+	fi;
+endef
 
-# PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
-# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
-# - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
-# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
-# To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
-.PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name bgp-cloud-connector-builder
-	$(CONTAINER_TOOL) buildx use bgp-cloud-connector-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm bgp-cloud-connector-builder
-	rm Dockerfile.cross
+# Push a single arch target image: $(call push_target,<arch>)
+define push_target
+	echo 'pushing image ${IMG}-$(1)'; \
+	$(CONTAINER_TOOL) push ${IMG}-$(1);
+endef
+
+# Add a single arch target to a manifest list: $(call manifest_add_target,<arch>)
+define manifest_add_target
+	echo 'manifest add target $(1)'; \
+	$(CONTAINER_TOOL) manifest add ${IMG} ${IMG}-$(1);
+endef
+
+.PHONY: image-build
+image-build: ## Build MULTIARCH_TARGETS images.
+	trap 'exit' INT; \
+	$(foreach target,$(MULTIARCH_TARGETS),$(call build_target,$(target)))
+
+.PHONY: image-push
+image-push: ## Push MULTIARCH_TARGETS images.
+	trap 'exit' INT; \
+	$(foreach target,$(MULTIARCH_TARGETS),$(call push_target,$(target)))
+
+.PHONY: manifest-build
+manifest-build: ## Build MULTIARCH_TARGETS manifest list.
+	@echo 'building manifest $(IMG)'
+	$(CONTAINER_TOOL) rmi ${IMG} -f 2>/dev/null || true
+	$(CONTAINER_TOOL) manifest create ${IMG} $(foreach target,$(MULTIARCH_TARGETS), --amend ${IMG}-$(target));
+
+.PHONY: manifest-push
+manifest-push: ## Push MULTIARCH_TARGETS manifest list.
+	@echo 'pushing manifest $(IMG)'
+ifeq (${CONTAINER_TOOL}, docker)
+	$(CONTAINER_TOOL) manifest push ${IMG};
+else
+	$(CONTAINER_TOOL) manifest push ${IMG} docker://${IMG};
+endif
+
 
 .PHONY: build-installer
 build-installer: manifests generate ## Generate a consolidated YAML with CRDs and deployment.
@@ -282,7 +313,7 @@ bundle-build: bundle ## Build the bundle image.
 
 .PHONY: bundle-push
 bundle-push: ## Push the bundle image.
-	$(MAKE) docker-push IMG=$(BUNDLE_IMG)
+	$(CONTAINER_TOOL) push $(BUNDLE_IMG)
 
 .PHONY: opm
 OPM = $(LOCALBIN)/opm
@@ -328,7 +359,7 @@ catalog-build: opm ## Build a catalog image.
 # Push the catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
-	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+	$(CONTAINER_TOOL) push $(CATALOG_IMG)
 
 # Catch-all so positional args (e.g. make test-e2e-aws my-cluster) don't error.
 %:
