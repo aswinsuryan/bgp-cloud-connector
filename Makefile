@@ -105,8 +105,13 @@ verify-vendor: vendor ## Fail if go.mod, go.sum or vendor/ are out of date.
 verify-version: set-version ## Fail if Containerfile labels are out of sync with VERSION.
 	git diff --exit-code --name-only Containerfile.bgp-cloud-connector Containerfile.bgp-cloud-connector-bundle
 
+.PHONY: verify-bundle
+verify-bundle: bundle ## Fail if bundle/ content is out of date.
+	git diff --exit-code -I'createdAt' --name-only bundle/
+	test -z "$$(git ls-files --others --exclude-standard -- bundle/)"
+
 .PHONY: verify
-verify: verify-vendor verify-version ## Run all verification checks.
+verify: verify-vendor verify-version verify-bundle ## Run all verification checks.
 
 .PHONY: install-git-hooks
 install-git-hooks: ## Run the tracked hooks in hack/githooks, including a pre-push vendor check.
