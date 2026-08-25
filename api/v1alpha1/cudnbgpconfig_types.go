@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// LivenessDetectionType specifies how BGP peer health is monitored.
 // +kubebuilder:validation:Enum=bfd;"bgp-keepalive"
 type LivenessDetectionType string
 
@@ -28,6 +29,7 @@ const (
 	LivenessDetectionBGPKeepalive LivenessDetectionType = "bgp-keepalive"
 )
 
+// PhaseType represents the lifecycle phase of a resource.
 // +kubebuilder:validation:Enum=Pending;Configuring;Ready;Degraded
 type PhaseType string
 
@@ -78,8 +80,12 @@ const (
 	ConditionCompleteNodeInventory    = "CompleteNodeInventory"
 )
 
+// BGPNeighbor identifies a single BGP peer by its IP address and AS number.
 type BGPNeighbor struct {
+	// Address is the IP address of the BGP neighbor.
+	// +kubebuilder:validation:XValidation:rule="self.isIP()",message="must be a valid IP address"
 	Address string `json:"address"`
+	// RemoteASN is the autonomous system number of the BGP neighbor.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=4294967295
 	RemoteASN int64 `json:"remoteASN"`
@@ -103,8 +109,12 @@ type BGPNeighbor struct {
 // the ones in its own; endpoints presented once for a region give a single
 // group covering every router node.
 type PeerGroup struct {
+	// NodeSelector is a set of labels used to select the router nodes
+	// that belong to this peer group.
 	NodeSelector map[string]string `json:"nodeSelector"`
+	// Neighbors is the list of BGP peers that nodes in this group establish sessions with.
 	// +kubebuilder:validation:MinItems=1
+	// +listType=atomic
 	Neighbors []BGPNeighbor `json:"neighbors"`
 }
 
@@ -112,8 +122,13 @@ type PeerGroup struct {
 // and their endpoints are per subnet, which is why AWS is the cloud that
 // produces more than one peer group.
 type AWSConfig struct {
+	// Region is the AWS region where the ROSA cluster and Route Servers are deployed.
+	// +kubebuilder:validation:MinLength=1
 	Region string `json:"region"`
+	// RouteServerIDs is the list of VPC Route Server IDs used for auto-discovery
+	// of BGP endpoints, neighbor IPs, availability zones, and remote ASN.
 	// +kubebuilder:validation:MinItems=1
+	// +listType=atomic
 	RouteServerIDs []string `json:"routeServerIDs"`
 }
 
@@ -207,37 +222,51 @@ type PeerGroupStatus struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 	// Neighbors are the addresses the router nodes in this group peer with.
 	// +optional
+	// +listType=atomic
 	Neighbors []BGPNeighbor `json:"neighbors,omitempty"`
 }
 
+// BGPConfig holds the BGP speaker configuration and optional peer groups.
 type BGPConfig struct {
+	// LocalASN is the autonomous system number for the cluster's FRR routers.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=4294967295
 	LocalASN int64 `json:"localASN"`
+	// LivenessDetection selects the mechanism used to detect BGP peer failure.
+	// BFD detects failure in ~1s; bgp-keepalive relies on the BGP hold timer (~90s).
+	// +optional
 	// +kubebuilder:default="bgp-keepalive"
 	LivenessDetection LivenessDetectionType `json:"livenessDetection,omitempty"`
+	// PeerGroups defines explicit BGP peer groups with neighbor addresses.
+	// Required when platform is Manual; must not be set on other platforms
+	// where peer groups are auto-discovered.
 	// +optional
+	// +listType=atomic
 	PeerGroups []PeerGroup `json:"peerGroups,omitempty"`
 }
 
-// The cloud block and the platform have to agree in both directions: naming a
-// platform without its block leaves the operator nothing to work from, and a
-// block without its platform is configuration that will never be read. Saying
-// it in CEL means the API server refuses it, rather than the operator
-// discovering it at reconcile and reporting Degraded.
+// CUDNBgpConfigSpec defines the desired BGP infrastructure configuration for the
+// cluster: which cloud platform to integrate with, which nodes act as BGP
+// routers, and how BGP sessions are established.
 //
-// peerGroups is the counterpart for Manual, which has no cloud to discover
-// from and so must declare its neighbours, and must not declare them on any
-// other platform, where they would silently lose to what was discovered.
 // +kubebuilder:validation:XValidation:rule="(self.platform == 'AWS') == has(self.aws)",message="spec.aws must be set when spec.platform is AWS, and must be absent otherwise"
 // +kubebuilder:validation:XValidation:rule="(self.platform == 'Azure') == has(self.azure)",message="spec.azure must be set when spec.platform is Azure, and must be absent otherwise"
 // +kubebuilder:validation:XValidation:rule="(self.platform == 'GCP') == has(self.gcp)",message="spec.gcp must be set when spec.platform is GCP, and must be absent otherwise"
 // +kubebuilder:validation:XValidation:rule="self.platform != 'Manual' || (has(self.bgp.peerGroups) && size(self.bgp.peerGroups) > 0)",message="spec.bgp.peerGroups is required when spec.platform is Manual"
 // +kubebuilder:validation:XValidation:rule="self.platform == 'Manual' || !has(self.bgp.peerGroups) || size(self.bgp.peerGroups) == 0",message="spec.bgp.peerGroups may only be set when spec.platform is Manual"
 type CUDNBgpConfigSpec struct {
-	Platform           PlatformType      `json:"platform"`
-	BGP                BGPConfig         `json:"bgp"`
+	// Platform selects the cloud provider integration mode.
+	// AWS auto-discovers BGP endpoints from VPC Route Servers.
+	// Manual requires explicit peer groups in spec.bgp.peerGroups.
+	Platform PlatformType `json:"platform"`
+	// BGP holds the BGP speaker configuration, including local ASN,
+	// liveness detection, and (under Manual platform) peer groups.
+	BGP BGPConfig `json:"bgp"`
+	// RouterNodeSelector is a set of labels that identify which cluster nodes
+	// act as BGP routers. Must match labels applied to BGP router machine pools.
 	RouterNodeSelector map[string]string `json:"routerNodeSelector"`
+	// AWS holds the AWS-specific configuration for auto-discovery of BGP
+	// infrastructure. Required when platform is AWS; must not be set otherwise.
 	// +optional
 	AWS *AWSConfig `json:"aws,omitempty"`
 	// +optional
@@ -245,21 +274,33 @@ type CUDNBgpConfigSpec struct {
 	GCP   *GCPConfig   `json:"gcp,omitempty"`
 }
 
+// CUDNBgpConfigStatus defines the observed state of CUDNBgpConfig.
 type CUDNBgpConfigStatus struct {
-	Phase              PhaseType          `json:"phase,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	// Phase is the current lifecycle phase of the BGP configuration.
+	// +optional
+	Phase PhaseType `json:"phase,omitempty"`
+	// Conditions represent the latest available observations of the resource's state.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// PeerGroups is the discovered peering plan: what the operator found in
 	// the cloud and rendered into FRRConfigurations. Empty under
 	// platform: Manual, where the plan is declared in spec.bgp.peerGroups
 	// rather than discovered.
 	// +optional
+	// +listType=atomic
 	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Cluster,shortName=bgpcc,categories=networking
+// +kubebuilder:printcolumn:name="Platform",type="string",JSONPath=".spec.platform"
+// +kubebuilder:printcolumn:name="LocalASN",type="integer",JSONPath=".spec.bgp.localASN"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
@@ -274,6 +315,7 @@ type CUDNBgpConfig struct {
 
 // +kubebuilder:object:root=true
 
+// CUDNBgpConfigList contains a list of CUDNBgpConfig.
 type CUDNBgpConfigList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
