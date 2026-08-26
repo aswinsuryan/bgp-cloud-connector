@@ -213,20 +213,20 @@ func (r *CUDNBgpRoutingReconciler) setDegraded(
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
+// SetupWithManager watches only APIs that exist on every cluster the
+// operator can be installed on. ClusterUserDefinedNetwork ships with
+// OVN-Kubernetes and qualifies; RouteAdvertisements does not, since CNO
+// creates that CRD only once CUDNBgpConfig has asked for route
+// advertisements. Drift on the RouteAdvertisements we write is picked up
+// by ResyncInterval instead.
 func (r *CUDNBgpRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	cudn := &unstructured.Unstructured{}
 	cudn.SetGroupVersionKind(CUDNNetworkGVK)
-
-	ra := &unstructured.Unstructured{}
-	ra.SetGroupVersionKind(RouteAdvertisementsGVK)
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkingv1alpha1.CUDNBgpRouting{}).
 		Watches(cudn, handler.EnqueueRequestsFromMapFunc(
 			r.mapCUDNToRouting,
-		)).
-		Watches(ra, handler.EnqueueRequestsFromMapFunc(
-			r.mapRAToRouting,
 		)).
 		Named("cudnbgprouting").
 		Complete(r)
@@ -247,19 +247,4 @@ func (r *CUDNBgpRoutingReconciler) mapCUDNToRouting(ctx context.Context, obj cli
 		}
 	}
 	return nil
-}
-
-func (r *CUDNBgpRoutingReconciler) mapRAToRouting(ctx context.Context, obj client.Object) []reconcile.Request {
-	if obj.GetLabels()[LabelManagedBy] != LabelManagedByVal {
-		return nil
-	}
-	routingList := &networkingv1alpha1.CUDNBgpRoutingList{}
-	if err := r.List(ctx, routingList); err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0, len(routingList.Items))
-	for _, rt := range routingList.Items {
-		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: rt.Name}})
-	}
-	return requests
 }
