@@ -388,3 +388,59 @@ func TestEnsureFRRConfigurationsFromGroups_RawFRRConfig(t *testing.T) {
 		t.Error("spec.raw should be absent when the group asks for no raw config")
 	}
 }
+
+// TestEnsureFRRConfigurationsFromGroups_EBGPMultiHop covers a neighbour that
+// is not on the node's link, which is what an Azure Route Server is: it sits
+// in its own subnet, and without multihop the session never establishes.
+//
+// A neighbour that is on the link must carry no such field at all, which is
+// what keeps the AWS output unchanged.
+func TestEnsureFRRConfigurationsFromGroups_EBGPMultiHop(t *testing.T) {
+	s := testScheme()
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfiguration"), &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"), &unstructured.UnstructuredList{})
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ns).Build()
+	ctx := context.Background()
+
+	config := &networkingv1alpha1.CUDNBgpConfig{
+		Spec: networkingv1alpha1.CUDNBgpConfigSpec{
+			Platform:           networkingv1alpha1.PlatformAWS,
+			BGP:                networkingv1alpha1.BGPConfig{LocalASN: 65001},
+			RouterNodeSelector: map[string]string{"bgp_router": "true"},
+		},
+	}
+
+	groups := []platform.PeerGroup{{
+		Key: "route-server",
+		Neighbors: []platform.DiscoveredNeighbor{
+			{Address: "10.0.1.4", ASN: 65515, EBGPMultiHop: true},
+			{Address: "10.0.1.5", ASN: 65515},
+		},
+	}}
+
+	if _, err := EnsureFRRConfigurationsFromGroups(ctx, c, config, groups); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(ctx, types.NamespacedName{Name: "cudn-bgp-1", Namespace: FRRNamespace}, obj); err != nil {
+		t.Fatalf("cudn-bgp-1 not created: %v", err)
+	}
+	routers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "bgp", "routers")
+	neighbors, _, _ := unstructured.NestedSlice(routers[0].(map[string]interface{}), "neighbors")
+	if len(neighbors) != 2 {
+		t.Fatalf("got %d neighbours, want 2", len(neighbors))
+	}
+
+	first := neighbors[0].(map[string]interface{})
+	if got, ok := first["ebgpMultiHop"]; !ok || got != true {
+		t.Errorf("off-link neighbour: ebgpMultiHop = %v (present=%t), want true", got, ok)
+	}
+	second := neighbors[1].(map[string]interface{})
+	if _, ok := second["ebgpMultiHop"]; ok {
+		t.Error("on-link neighbour should carry no ebgpMultiHop field")
+	}
+}

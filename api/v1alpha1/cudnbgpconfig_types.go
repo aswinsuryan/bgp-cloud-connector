@@ -40,19 +40,23 @@ const (
 
 // PlatformType selects which cloud the operator reconciles BGP peering
 // against. It is the discriminator for the cloud-specific block in the spec.
-// +kubebuilder:validation:Enum=AWS;GCP;Manual
+// +kubebuilder:validation:Enum=AWS;Azure;GCP;Manual
 type PlatformType string
 
 // AllPlatforms is every value the enum above accepts. The dispatch test walks
 // it, so a value added to the marker and forgotten here, or added to both and
 // never given a builder, fails rather than surfacing as "no platform
 // implementation" at runtime on a live cluster.
-var AllPlatforms = []PlatformType{PlatformAWS, PlatformGCP, PlatformManual}
+var AllPlatforms = []PlatformType{PlatformAWS, PlatformAzure, PlatformGCP, PlatformManual}
 
 const (
 	// PlatformAWS discovers BGP neighbours from VPC Route Server endpoints and
 	// reconciles Route Server peers and source/dest check. Requires spec.aws.
 	PlatformAWS PlatformType = "AWS"
+	// PlatformAzure discovers BGP neighbours from an Azure Route Server and
+	// reconciles its BGP connections and the router nodes' network interfaces.
+	// Requires spec.azure.
+	PlatformAzure PlatformType = "Azure"
 	// PlatformGCP discovers BGP neighbors from a Cloud Router and reconciles
 	// NCC spokes, Cloud Router peers and GCE instance attributes. Requires
 	// spec.gcp.
@@ -78,6 +82,16 @@ type BGPNeighbor struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=4294967295
 	RemoteASN int64 `json:"remoteASN"`
+	// EBGPMultiHop allows the session to be established with a peer that is
+	// not on this node's link.
+	//
+	// An Azure Route Server needs it, because it sits in its own subnet rather
+	// than on the node's; an AWS Route Server endpoint does not. Declared here
+	// rather than inferred, because whether a neighbour is on the link is a
+	// property of the cloud's topology and not something this operator can
+	// work out.
+	// +optional
+	EBGPMultiHop bool `json:"ebgpMultiHop,omitempty"`
 }
 
 // PeerGroup is a set of router nodes sharing a neighbour set, and becomes one
@@ -100,6 +114,41 @@ type AWSConfig struct {
 	Region string `json:"region"`
 	// +kubebuilder:validation:MinItems=1
 	RouteServerIDs []string `json:"routeServerIDs"`
+}
+
+// AzureConfig names the Route Server. Its addresses and ASN are read from it
+// rather than declared: there is exactly one per virtual network, so there is
+// nothing to enumerate, and Azure fixes the far-side ASN with no flag to
+// change it.
+type AzureConfig struct {
+	// +kubebuilder:validation:MinLength=1
+	SubscriptionID string `json:"subscriptionID"`
+	// +kubebuilder:validation:MinLength=1
+	ResourceGroup string `json:"resourceGroup"`
+	// RouteServerName is the Azure Route Server whose BGP connections this
+	// operator manages. Azure models it as a Virtual Hub, and its
+	// virtualRouterIps become the BGP neighbours.
+	// +kubebuilder:validation:MinLength=1
+	RouteServerName string `json:"routeServerName"`
+	// NetworkInterfaceClientID is the managed identity to use for network
+	// interface calls, where that differs from the identity the operator
+	// otherwise runs as.
+	//
+	// A router node's interface and the Route Server can sit in resource
+	// groups reachable by different identities. On ARO the interfaces are in a
+	// resource group the cluster does not own, and the identity with write
+	// access there is the cluster's own machine-api identity, which cannot be
+	// granted to this operator. Naming it here exchanges the operator's
+	// projected service account token for that identity, for interface calls
+	// only; Route Server calls continue to use the identity the operator runs
+	// as.
+	//
+	// The identity named here must carry a federated credential trusting this
+	// operator's service account. Unset means one identity reaches both, which
+	// is the case wherever the cluster owns the resource group holding its own
+	// interfaces.
+	// +optional
+	NetworkInterfaceClientID string `json:"networkInterfaceClientID,omitempty"`
 }
 
 // NCCConfig identifies the Network Connectivity Center hub the router nodes
@@ -180,6 +229,7 @@ type BGPConfig struct {
 // from and so must declare its neighbours, and must not declare them on any
 // other platform, where they would silently lose to what was discovered.
 // +kubebuilder:validation:XValidation:rule="(self.platform == 'AWS') == has(self.aws)",message="spec.aws must be set when spec.platform is AWS, and must be absent otherwise"
+// +kubebuilder:validation:XValidation:rule="(self.platform == 'Azure') == has(self.azure)",message="spec.azure must be set when spec.platform is Azure, and must be absent otherwise"
 // +kubebuilder:validation:XValidation:rule="(self.platform == 'GCP') == has(self.gcp)",message="spec.gcp must be set when spec.platform is GCP, and must be absent otherwise"
 // +kubebuilder:validation:XValidation:rule="self.platform != 'Manual' || (has(self.bgp.peerGroups) && size(self.bgp.peerGroups) > 0)",message="spec.bgp.peerGroups is required when spec.platform is Manual"
 // +kubebuilder:validation:XValidation:rule="self.platform == 'Manual' || !has(self.bgp.peerGroups) || size(self.bgp.peerGroups) == 0",message="spec.bgp.peerGroups may only be set when spec.platform is Manual"
@@ -190,7 +240,8 @@ type CUDNBgpConfigSpec struct {
 	// +optional
 	AWS *AWSConfig `json:"aws,omitempty"`
 	// +optional
-	GCP *GCPConfig `json:"gcp,omitempty"`
+	Azure *AzureConfig `json:"azure,omitempty"`
+	GCP   *GCPConfig   `json:"gcp,omitempty"`
 }
 
 type CUDNBgpConfigStatus struct {

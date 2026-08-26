@@ -45,6 +45,7 @@ import (
 	networkingv1alpha1 "github.com/openshift/bgp-cloud-connector/api/v1alpha1"
 	"github.com/openshift/bgp-cloud-connector/internal/platform"
 	awsplatform "github.com/openshift/bgp-cloud-connector/internal/platform/aws"
+	azureplatform "github.com/openshift/bgp-cloud-connector/internal/platform/azure"
 	gcpplatform "github.com/openshift/bgp-cloud-connector/internal/platform/gcp"
 )
 
@@ -246,8 +247,9 @@ func peerGroupsToStatus(groups []platform.PeerGroup) []networkingv1alpha1.PeerGr
 		}
 		for _, n := range g.Neighbors {
 			pg.Neighbors = append(pg.Neighbors, networkingv1alpha1.BGPNeighbor{
-				Address:   n.Address,
-				RemoteASN: n.ASN,
+				Address:      n.Address,
+				RemoteASN:    n.ASN,
+				EBGPMultiHop: n.EBGPMultiHop,
 			})
 		}
 		out = append(out, pg)
@@ -262,6 +264,8 @@ func defaultPlatformBuilder(ctx context.Context, c client.Client, config *networ
 	switch config.Spec.Platform {
 	case networkingv1alpha1.PlatformAWS:
 		return buildAWSPlatform(ctx, c, config)
+	case networkingv1alpha1.PlatformAzure:
+		return buildAzurePlatform(ctx, c, config)
 	case networkingv1alpha1.PlatformGCP:
 		return buildGCPPlatform(ctx, c, config)
 	default:
@@ -286,6 +290,24 @@ func buildAWSPlatform(ctx context.Context, c client.Client, config *networkingv1
 	}
 
 	return awsplatform.New(ctx, cfg)
+}
+
+func buildAzurePlatform(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+	azureSpec := config.Spec.Azure
+
+	clusterID, err := getInfrastructureName(ctx, c)
+	if err != nil {
+		return nil, fmt.Errorf("reading cluster infrastructure name: %w", err)
+	}
+
+	return azureplatform.New(azureplatform.Config{
+		SubscriptionID:  azureSpec.SubscriptionID,
+		ResourceGroup:   azureSpec.ResourceGroup,
+		RouteServerName: azureSpec.RouteServerName,
+		NICClientID:     azureSpec.NetworkInterfaceClientID,
+		LocalASN:        config.Spec.BGP.LocalASN,
+		ClusterID:       clusterID,
+	})
 }
 
 func buildGCPPlatform(ctx context.Context, c client.Client, config *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
