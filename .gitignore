@@ -13,9 +13,11 @@ bin/
 *.test
 testbin/
 
-# Code coverage profiles and other test artifacts
+# Code coverage profiles and other test artifacts.
+# coverage.* is anchored: without the leading slash git matches it at
+# any depth, and it silently excluded two vendored files.
 *.out
-coverage.*
+/coverage.*
 *.coverprofile
 profile.cov
 
