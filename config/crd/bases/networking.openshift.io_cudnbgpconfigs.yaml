@@ -125,12 +125,69 @@ spec:
                 required:
                 - localASN
                 type: object
+              gcp:
+                description: |-
+                  GCPConfig names the Cloud Router carrying the BGP, and the hub and spoke
+                  that make a node eligible to peer with it.
+                properties:
+                  cloudRouterName:
+                    description: |-
+                      CloudRouterName is the Cloud Router the router nodes peer with; its
+                      interface addresses become the BGP neighbors. It must not be the
+                      installer's Cloud NAT router, which has no interfaces and carries the
+                      cluster's egress.
+                    minLength: 1
+                    type: string
+                  enableNestedVirtualization:
+                    default: true
+                    description: |-
+                      EnableNestedVirtualization turns on nested virtualization on the router
+                      instances, which KubeVirt needs. Enabling it restarts the instance.
+                    type: boolean
+                  ncc:
+                    description: |-
+                      NCCConfig identifies the Network Connectivity Center hub the router nodes
+                      attach to as spokes. On GCP, membership is a precondition of peering rather
+                      than part of it: a VM cannot peer with a Cloud Router until it belongs to a
+                      router appliance spoke.
+                    properties:
+                      hubName:
+                        minLength: 1
+                        type: string
+                      siteToSiteDataTransfer:
+                        description: |-
+                          SiteToSiteDataTransfer enables NCC site-to-site data transfer on the
+                          managed spokes.
+                        type: boolean
+                      spokePrefix:
+                        description: |-
+                          SpokePrefix names the spokes this operator manages. Spokes are numbered
+                          from it, because a spoke holds a limited number of instances.
+                        minLength: 1
+                        type: string
+                    required:
+                    - hubName
+                    - spokePrefix
+                    type: object
+                  project:
+                    minLength: 1
+                    type: string
+                  region:
+                    minLength: 1
+                    type: string
+                required:
+                - cloudRouterName
+                - ncc
+                - project
+                - region
+                type: object
               platform:
                 description: |-
                   PlatformType selects which cloud the operator reconciles BGP peering
                   against. It is the discriminator for the cloud-specific block in the spec.
                 enum:
                 - AWS
+                - GCP
                 - Manual
                 type: string
               routerNodeSelector:
@@ -146,6 +203,9 @@ spec:
             - message: spec.aws must be set when spec.platform is AWS, and must be
                 absent otherwise
               rule: (self.platform == 'AWS') == has(self.aws)
+            - message: spec.gcp must be set when spec.platform is GCP, and must be
+                absent otherwise
+              rule: (self.platform == 'GCP') == has(self.gcp)
             - message: spec.bgp.peerGroups is required when spec.platform is Manual
               rule: self.platform != 'Manual' || (has(self.bgp.peerGroups) && size(self.bgp.peerGroups)
                 > 0)
