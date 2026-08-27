@@ -55,9 +55,7 @@ endif
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
 
-# Go architecture and multi-arch image targets.
-# Locally defaults to amd64; CI overrides to "amd64 arm64 ppc64le s390x".
-GOARCH ?= amd64
+# Architectures for local multi-arch image builds (image-build, manifest-build).
 MULTIARCH_TARGETS ?= amd64
 
 ifeq ("$(CONTAINER_TOOL)","docker")
@@ -178,7 +176,7 @@ set-version: ## Sync VERSION file to all Containerfile labels.
 
 .PHONY: build-operator
 build-operator: ## Build manager binary, no additional checks or code generation.
-	GOARCH=${GOARCH} go build -tags strictfipsruntime -o bin/manager cmd/main.go
+	go build -tags strictfipsruntime -o bin/manager cmd/main.go
 
 .PHONY: build
 build: manifests generate fmt vet build-operator ## Build manager binary.
