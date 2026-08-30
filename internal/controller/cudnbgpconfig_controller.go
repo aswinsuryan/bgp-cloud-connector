@@ -155,6 +155,12 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		p, err := buildPlatform(ctx, r.Client, config)
 		if err != nil {
+			// We will not reach Phase 5, so drop any stale CompleteNodeInventory
+			// from a previous reconcile; leaving a True/False here would misreport
+			// node inventory alongside the degraded cloud condition. This path
+			// returns before completeReconcile, so the NodesIncomplete timer is
+			// unaffected.
+			meta.RemoveStatusCondition(&config.Status.Conditions, networkingv1alpha1.ConditionCompleteNodeInventory)
 			var credErr *platform.CredentialError
 			if errors.As(err, &credErr) {
 				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
@@ -169,6 +175,13 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.Info("Phase 3: discovering cloud BGP endpoints")
 		discoveryResult, err = cloudPlatform.DiscoverEndpoints(ctx)
 		if err != nil {
+			// Same rationale as the buildPlatform failure above.
+			meta.RemoveStatusCondition(&config.Status.Conditions, networkingv1alpha1.ConditionCompleteNodeInventory)
+			var notFoundErr *awsplatform.RouteServerNotFoundError
+			if errors.As(err, &notFoundErr) {
+				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
+					ReasonRouteServerNotFound, notFoundErr.Error())
+			}
 			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
 				"CloudDiscoveryFailed", fmt.Sprintf("failed to discover cloud BGP endpoints: %v", err))
 		}

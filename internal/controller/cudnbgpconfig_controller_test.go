@@ -574,6 +574,63 @@ func TestConfigReconcile_AWSCredentialFailure(t *testing.T) {
 	t.Error("CloudEndpointsDiscovered condition not found")
 }
 
+// TestConfigReconcile_CredentialFailure_ClearsStaleNodeInventory verifies that a
+// stale CompleteNodeInventory=True left by a previous successful reconcile does not
+// survive a later credential failure that returns before Phase 5 runs.
+func TestConfigReconcile_CredentialFailure_ClearsStaleNodeInventory(t *testing.T) {
+	config := newTestCUDNBgpConfigWithAWS()
+	config.Finalizers = []string{ConfigFinalizerName}
+	// Seed a stale condition as if a previous reconcile had a complete inventory.
+	config.Status.Conditions = []metav1.Condition{{
+		Type:               networkingv1alpha1.ConditionCompleteNodeInventory,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Complete",
+		Message:            "stale from a previous reconcile",
+		LastTransitionTime: metav1.Now(),
+	}}
+	s := configTestScheme()
+
+	network := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "operator.openshift.io/v1",
+			"kind":       "Network",
+			"metadata":   map[string]interface{}{"name": "cluster"},
+			"spec":       map[string]interface{}{},
+		},
+	}
+	frrNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: FRRNamespace}}
+	frrPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "frr-k8s-pod", Namespace: FRRNamespace, Labels: map[string]string{"app": "frr-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, network, frrNS, frrPod).
+		WithStatusSubresource(config).
+		Build()
+
+	r := &CUDNBgpConfigReconciler{
+		Client: c, Scheme: s,
+		PlatformBuilder: func(_ context.Context, _ client.Client, _ *networkingv1alpha1.CUDNBgpConfig) (platform.CloudPlatform, error) {
+			return nil, &platform.CredentialError{Msg: "invalid credentials"}
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+
+	updated := &networkingv1alpha1.CUDNBgpConfig{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "cluster"}, updated); err != nil {
+		t.Fatalf("failed to get config: %v", err)
+	}
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == networkingv1alpha1.ConditionCompleteNodeInventory {
+			t.Errorf("expected stale CompleteNodeInventory to be cleared, got %s/%s", cond.Status, cond.Reason)
+		}
+	}
+}
+
 // TestConfigReconcile_RouteServerNotFound_NoRequeue: non-existent route server ID is
 // terminal — user must correct spec.aws.routeServerIDs.
 func TestConfigReconcile_RouteServerNotFound_NoRequeue(t *testing.T) {
