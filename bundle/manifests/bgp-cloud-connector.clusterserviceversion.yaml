@@ -46,7 +46,7 @@ metadata:
     capabilities: Basic Install
     categories: Networking
     containerImage: controller:latest
-    createdAt: "2026-08-26T14:41:44Z"
+    createdAt: "2026-08-31T16:17:07Z"
     description: Automates L3 direct routing between CUDN Pod networks and external
       networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
       on AWS (VPC Route Server) and works on-premise with explicit configuration.
@@ -75,8 +75,9 @@ spec:
       name: cudnbgpconfigs.networking.openshift.io
       version: v1alpha1
     - description: |-
-        CUDNBgpRouting declares a single CUDN network to advertise via BGP.
-        Users must pre-create and label namespaces; the operator manages only the CUDN and RouteAdvertisements.
+        CUDNBgpRouting declares a single network to advertise via BGP.
+        Users must pre-create and label namespaces; the operator manages only the
+        ClusterUserDefinedNetwork and RouteAdvertisements.
       displayName: CUDNBgp Routing
       kind: CUDNBgpRouting
       name: cudnbgproutings.networking.openshift.io
