@@ -551,10 +551,13 @@ func nodeRelevantChangePredicate() predicate.Predicate {
 	}
 }
 
+// SetupWithManager watches only APIs that exist on every cluster the
+// operator can be installed on. FRRConfiguration is not one of them: CNO
+// creates that CRD in response to the patch this controller applies in
+// Phase 1, so demanding it here would mean the manager could only start
+// on a cluster where its own work had already been done. Drift on the
+// FRRConfigurations we write is picked up by ResyncInterval instead.
 func (r *CUDNBgpConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	frrCfg := &unstructured.Unstructured{}
-	frrCfg.SetGroupVersionKind(FRRConfigurationGVK)
-
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkingv1alpha1.CUDNBgpConfig{}).
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(
@@ -562,14 +565,6 @@ func (r *CUDNBgpConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: SingletonName}}}
 			},
 		), builder.WithPredicates(nodeRelevantChangePredicate())).
-		Watches(frrCfg, handler.EnqueueRequestsFromMapFunc(
-			func(_ context.Context, obj client.Object) []reconcile.Request {
-				if obj.GetLabels()[LabelManagedBy] != LabelManagedByVal {
-					return nil
-				}
-				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: SingletonName}}}
-			},
-		)).
 		Named("cudnbgpconfig").
 		Complete(r)
 }

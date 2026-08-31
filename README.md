@@ -652,16 +652,14 @@ On any `Degraded` state, the controller automatically retries every 30 seconds.
 
 ### Watches and drift recovery
 
-Both controllers watch their downstream resources for immediate drift detection. If a managed resource is deleted or modified externally, the responsible controller is notified and reconciles.
-
 | Controller | Watches | Triggers reconcile of |
 |:---|:---|:---|
-| CUDNBgpConfig | `FRRConfiguration` (label-filtered) | `cluster` singleton |
 | CUDNBgpConfig | `Node` (label/address/providerID changes) | `cluster` singleton |
 | CUDNBgpRouting | `ClusterUserDefinedNetwork` (label-filtered) | owning `CUDNBgpRouting` CR |
-| CUDNBgpRouting | `RouteAdvertisements` (label-filtered) | all `CUDNBgpRouting` CRs |
 
 Only resources labeled `app.kubernetes.io/managed-by: cudn-bgp-routing-operator` trigger reconciliation. In addition, both controllers re-reconcile every 5 minutes in the `Ready` state as a safety-net backstop.
+
+`FRRConfiguration` and `RouteAdvertisements` are deliberately not watched. Neither CRD exists until the operator patches the Network operator, so watching them would mean the manager could only start on a cluster where its own work had already been done: it would fail to sync those caches and exit. Drift on the `FRRConfigurations` and the shared `RouteAdvertisements` the operator writes is corrected at the next resync instead, so it is noticed within `--resync-interval` rather than immediately.
 
 Inspect the failing condition for the root cause:
 
