@@ -949,3 +949,99 @@ func TestCleanup_DeletesManagedPeerOnPage2(t *testing.T) {
 		t.Errorf("expected delete of peer-ep-a1, got %s", aws.ToString(mock.deletePeerCalls[0].RouteServerPeerId))
 	}
 }
+
+// managedPeersMock returns one managed peer per named endpoint, so a test can
+// see which of them a reconcile pass would delete.
+func managedPeersMock(peers map[string]string) *mockEC2 {
+	return &mockEC2{
+		// ReconcileNodes runs the source/dest check after the peers, so an
+		// instance with a primary ENI has to exist for it to reach that far.
+		describeInstFunc: func(_ *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+			return &ec2.DescribeInstancesOutput{
+				Reservations: []ec2types.Reservation{{
+					Instances: []ec2types.Instance{{
+						NetworkInterfaces: []ec2types.InstanceNetworkInterface{{
+							NetworkInterfaceId: aws.String("eni-primary"),
+							SourceDestCheck:    aws.Bool(false),
+							Attachment:         &ec2types.InstanceNetworkInterfaceAttachment{DeviceIndex: aws.Int32(0)},
+						}},
+					}},
+				}},
+			}, nil
+		},
+		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+			var out []ec2types.RouteServerPeer
+			for endpoint, addr := range peers {
+				out = append(out, ec2types.RouteServerPeer{
+					PeerAddress:           aws.String(addr),
+					RouteServerPeerId:     aws.String("peer-" + endpoint),
+					RouteServerEndpointId: aws.String(endpoint),
+					Tags: []ec2types.Tag{
+						{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")},
+					},
+				})
+			}
+			return &ec2.DescribeRouteServerPeersOutput{RouteServerPeers: out}, nil
+		},
+	}
+}
+
+// TestReconcileNodes_EmptyNodeListLeavesPeersAlone covers a router node
+// selector that momentarily matches nothing, which happens whenever the label
+// is being moved during a rollout.
+//
+// Reconciling an empty set the same way as a shrunk one makes every managed
+// peer stale at once, so a transient gap in the node list tears down BGP for
+// the whole cluster. Releasing the peers is what Cleanup is for, and it runs
+// on deletion, where the intent is unambiguous.
+func TestReconcileNodes_EmptyNodeListLeavesPeersAlone(t *testing.T) {
+	mock := managedPeersMock(map[string]string{"ep-a1": "10.0.1.10"})
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		localASN:      65001,
+		clusterID:     "test-cluster",
+	}
+
+	if err := p.ReconcileNodes(context.Background(), nil); err != nil {
+		t.Fatalf("ReconcileNodes on an empty node list: %v", err)
+	}
+
+	if len(mock.deletePeerCalls) != 0 {
+		t.Errorf("deleted %d peers, want 0: an empty node list must not release the peers", len(mock.deletePeerCalls))
+	}
+}
+
+// TestReconcileNodes_ShrunkNodeListStillDeletes guards the early return from
+// swallowing the case it must not: an AZ losing its last node while other AZs
+// still have one has to reach EC2, or a removed node keeps its peer forever.
+func TestReconcileNodes_ShrunkNodeListStillDeletes(t *testing.T) {
+	mock := managedPeersMock(map[string]string{
+		"ep-a1": "10.0.1.10",
+		"ep-b1": "10.0.2.20",
+	})
+	p := &Platform{
+		ec2Client: mock,
+		endpointsByAZ: map[string][]string{
+			"us-east-1a": {"ep-a1"},
+			"us-east-1b": {"ep-b1"},
+		},
+		localASN:  65001,
+		clusterID: "test-cluster",
+	}
+
+	nodes := []platform.RouterNode{
+		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+	}
+
+	if err := p.ReconcileNodes(context.Background(), nodes); err != nil {
+		t.Fatalf("ReconcileNodes: %v", err)
+	}
+
+	if len(mock.deletePeerCalls) != 1 {
+		t.Fatalf("deleted %d peers, want 1: us-east-1b has no node left", len(mock.deletePeerCalls))
+	}
+	if got := aws.ToString(mock.deletePeerCalls[0].RouteServerPeerId); got != "peer-ep-b1" {
+		t.Errorf("deleted %s, want peer-ep-b1", got)
+	}
+}
