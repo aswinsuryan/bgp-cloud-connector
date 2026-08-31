@@ -338,6 +338,41 @@ func TestReconcilePeers_BFDLivenessDetection(t *testing.T) {
 	}
 }
 
+func TestReconcilePeers_SkipsManagedPeerWithNilFields(t *testing.T) {
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	mock := &mockEC2{
+		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+			return &ec2.DescribeRouteServerPeersOutput{
+				RouteServerPeers: []ec2types.RouteServerPeer{
+					// Managed (tagged) peer missing both PeerAddress and
+					// RouteServerPeerId — the nil checks below must skip it;
+					// removing either one panics on the dereference.
+					{RouteServerEndpointId: aws.String("ep-a1"), Tags: managedTag},
+				},
+			}, nil
+		},
+	}
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		localASN:      65001,
+		clusterID:     "test-cluster",
+	}
+
+	nodes := []platform.RouterNode{
+		{Name: "node-a", PrivateIP: "10.0.1.10", Zone: "us-east-1a", ProviderID: "aws:///us-east-1a/i-a"},
+	}
+	if err := p.reconcileRouteServerPeers(context.Background(), nodes); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The nil-field peer is invisible to the managed set, so the desired IP
+	// still gets a fresh peer created for it.
+	if len(mock.createPeerCalls) != 1 {
+		t.Fatalf("expected 1 create call despite the nil-field managed peer, got %d", len(mock.createPeerCalls))
+	}
+}
+
 func TestCleanup_DeletesAllManagedPeers(t *testing.T) {
 	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
 	mock := &mockEC2{
@@ -362,6 +397,34 @@ func TestCleanup_DeletesAllManagedPeers(t *testing.T) {
 
 	if len(mock.deletePeerCalls) != 6 {
 		t.Errorf("expected 6 delete calls (3 AZs × 2 endpoints), got %d", len(mock.deletePeerCalls))
+	}
+}
+
+func TestCleanup_SkipsManagedPeerWithNilRouteServerPeerId(t *testing.T) {
+	managedTag := []ec2types.Tag{{Key: aws.String("managed-by"), Value: aws.String("cudn-bgp-routing-operator/test-cluster")}}
+	mock := &mockEC2{
+		describePeersFunc: func(_ *ec2.DescribeRouteServerPeersInput) (*ec2.DescribeRouteServerPeersOutput, error) {
+			return &ec2.DescribeRouteServerPeersOutput{
+				RouteServerPeers: []ec2types.RouteServerPeer{
+					// Managed (tagged) peer missing RouteServerPeerId — the
+					// nil check below must skip it; removing it panics on
+					// the dereference.
+					{PeerAddress: aws.String("10.0.0.1"), RouteServerEndpointId: aws.String("ep-a1"), Tags: managedTag},
+				},
+			}, nil
+		},
+	}
+	p := &Platform{
+		ec2Client:     mock,
+		endpointsByAZ: map[string][]string{"us-east-1a": {"ep-a1"}},
+		clusterID:     "test-cluster",
+	}
+
+	if err := p.Cleanup(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mock.deletePeerCalls) != 0 {
+		t.Errorf("expected no delete calls for a peer with nil RouteServerPeerId, got %d", len(mock.deletePeerCalls))
 	}
 }
 
@@ -713,6 +776,42 @@ func TestDiscoverEndpoints_Page2Error(t *testing.T) {
 	_, err := p.DiscoverEndpoints(context.Background())
 	if err == nil {
 		t.Fatal("expected error on page 2 failure")
+	}
+}
+
+func TestDiscoverEndpoints_EmptySubnetAZ(t *testing.T) {
+	mock := &mockEC2{
+		describeRSFunc: func(input *ec2.DescribeRouteServersInput) (*ec2.DescribeRouteServersOutput, error) {
+			return &ec2.DescribeRouteServersOutput{
+				RouteServers: []ec2types.RouteServer{
+					{RouteServerId: aws.String(input.RouteServerIds[0]), AmazonSideAsn: aws.Int64(64512)},
+				},
+			}, nil
+		},
+		describeRSEFunc: func(_ *ec2.DescribeRouteServerEndpointsInput) (*ec2.DescribeRouteServerEndpointsOutput, error) {
+			return &ec2.DescribeRouteServerEndpointsOutput{
+				RouteServerEndpoints: []ec2types.RouteServerEndpoint{
+					{RouteServerEndpointId: aws.String("rse-a1"), RouteServerId: aws.String("rs-1"), SubnetId: aws.String("subnet-a"), EniAddress: aws.String("10.0.1.47")},
+				},
+			}, nil
+		},
+		describeSubFunc: func(_ *ec2.DescribeSubnetsInput) (*ec2.DescribeSubnetsOutput, error) {
+			// DescribeSubnets errors out entirely if a requested subnet ID is
+			// unknown to AWS, so the only way this map ends up incomplete for
+			// a real request is a subnet that exists but reports no AZ.
+			return &ec2.DescribeSubnetsOutput{Subnets: []ec2types.Subnet{
+				{SubnetId: aws.String("subnet-a"), AvailabilityZone: aws.String("")},
+			}}, nil
+		},
+	}
+
+	p := &Platform{
+		ec2Client:      mock,
+		routeServerIDs: []string{"rs-1"},
+	}
+	_, err := p.DiscoverEndpoints(context.Background())
+	if err == nil {
+		t.Fatal("expected error when a subnet reports an empty availability zone")
 	}
 }
 
