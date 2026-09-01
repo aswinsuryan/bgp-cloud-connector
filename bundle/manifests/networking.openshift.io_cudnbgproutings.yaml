@@ -8,9 +8,13 @@ metadata:
 spec:
   group: networking.openshift.io
   names:
+    categories:
+    - networking
     kind: CUDNBgpRouting
     listKind: CUDNBgpRoutingList
     plural: cudnbgproutings
+    shortNames:
+    - bgpr
     singular: cudnbgprouting
   scope: Cluster
   versions:
@@ -28,8 +32,9 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          CUDNBgpRouting declares a single CUDN network to advertise via BGP.
-          Users must pre-create and label namespaces; the operator manages only the CUDN and RouteAdvertisements.
+          CUDNBgpRouting declares a single network to advertise via BGP.
+          Users must pre-create and label namespaces; the operator manages only the
+          ClusterUserDefinedNetwork and RouteAdvertisements.
         properties:
           apiVersion:
             description: |-
@@ -49,27 +54,44 @@ spec:
           metadata:
             type: object
           spec:
+            description: |-
+              CUDNBgpRoutingSpec defines the desired routing configuration for a single
+              network to advertise via BGP.
             properties:
               network:
+                description: Network defines the network to create and advertise.
                 properties:
                   name:
+                    description: |-
+                      Name identifies the network. The operator creates a ClusterUserDefinedNetwork
+                      named cluster-udn-<name> that selects namespaces with label cluster-udn: <name>.
+                    minLength: 1
                     type: string
                   subnets:
+                    description: Subnets is the list of CIDRs for the network (1 for
+                      single-stack, 2 for dual-stack).
                     items:
                       type: string
                     maxItems: 2
                     minItems: 1
                     type: array
+                    x-kubernetes-list-type: atomic
                 required:
                 - name
                 - subnets
                 type: object
+                x-kubernetes-validations:
+                - message: each subnet must be a valid CIDR (e.g. 10.0.0.0/16 or 2001:db8::/64)
+                  rule: self.subnets.all(s, s.isCIDR())
             required:
             - network
             type: object
           status:
+            description: CUDNBgpRoutingStatus defines the observed state of CUDNBgpRouting.
             properties:
               conditions:
+                description: Conditions represent the latest available observations
+                  of the resource's state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -125,10 +147,16 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
                 format: int64
                 type: integer
               phase:
+                description: Phase is the current lifecycle phase of the routing configuration.
                 enum:
                 - Pending
                 - Configuring

@@ -64,8 +64,9 @@ spec:
       name: cudnbgpconfigs.networking.openshift.io
       version: v1alpha1
     - description: |-
-        CUDNBgpRouting declares a single CUDN network to advertise via BGP.
-        Users must pre-create and label namespaces; the operator manages only the CUDN and RouteAdvertisements.
+        CUDNBgpRouting declares a single network to advertise via BGP.
+        Users must pre-create and label namespaces; the operator manages only the
+        ClusterUserDefinedNetwork and RouteAdvertisements.
       displayName: CUDNBgp Routing
       kind: CUDNBgpRouting
       name: cudnbgproutings.networking.openshift.io

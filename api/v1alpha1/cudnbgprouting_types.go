@@ -25,32 +25,53 @@ const (
 	ConditionRouteAdvertisementsCreated = "RouteAdvertisementsCreated"
 )
 
+// NetworkConfig defines a network to be created and advertised via BGP.
+//
+// +kubebuilder:validation:XValidation:rule="self.subnets.all(s, s.isCIDR())",message="each subnet must be a valid CIDR (e.g. 10.0.0.0/16 or 2001:db8::/64)"
 type NetworkConfig struct {
+	// Name identifies the network. The operator creates a ClusterUserDefinedNetwork
+	// named cluster-udn-<name> that selects namespaces with label cluster-udn: <name>.
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+	// Subnets is the list of CIDRs for the network (1 for single-stack, 2 for dual-stack).
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=2
+	// +listType=atomic
 	Subnets []string `json:"subnets"`
 }
 
+// CUDNBgpRoutingSpec defines the desired routing configuration for a single
+// network to advertise via BGP.
 type CUDNBgpRoutingSpec struct {
+	// Network defines the network to create and advertise.
 	Network NetworkConfig `json:"network"`
 }
 
+// CUDNBgpRoutingStatus defines the observed state of CUDNBgpRouting.
 type CUDNBgpRoutingStatus struct {
-	Phase              PhaseType          `json:"phase,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	// Phase is the current lifecycle phase of the routing configuration.
+	// +optional
+	Phase PhaseType `json:"phase,omitempty"`
+	// Conditions represent the latest available observations of the resource's state.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Cluster,shortName=bgpr,categories=networking
 // +kubebuilder:printcolumn:name="Network",type="string",JSONPath=".spec.network.name"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
-// CUDNBgpRouting declares a single CUDN network to advertise via BGP.
-// Users must pre-create and label namespaces; the operator manages only the CUDN and RouteAdvertisements.
+// CUDNBgpRouting declares a single network to advertise via BGP.
+// Users must pre-create and label namespaces; the operator manages only the
+// ClusterUserDefinedNetwork and RouteAdvertisements.
 type CUDNBgpRouting struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -61,6 +82,7 @@ type CUDNBgpRouting struct {
 
 // +kubebuilder:object:root=true
 
+// CUDNBgpRoutingList contains a list of CUDNBgpRouting.
 type CUDNBgpRoutingList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
