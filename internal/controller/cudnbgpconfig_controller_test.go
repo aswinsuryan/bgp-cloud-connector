@@ -1129,7 +1129,9 @@ func TestConfigReconcile_ManualClearsStaleCloudStatus(t *testing.T) {
 
 	r := &CUDNBgpConfigReconciler{Client: c, Scheme: s}
 
-	_, _ = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}})
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
+		t.Fatalf("reconcile error: %v", err)
+	}
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "cluster"}}); err != nil {
 		t.Fatalf("reconcile error: %v", err)
 	}

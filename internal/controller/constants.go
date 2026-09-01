@@ -74,18 +74,20 @@ const (
 	ReasonRoutingCRsExist = "RoutingCRsExist"
 )
 
-// TerminalDegradedReasons are condition reasons that must not schedule RequeueAfter.
-var TerminalDegradedReasons = map[string]struct{}{
-	ReasonInvalidName:             {},
-	ReasonDuplicateNetwork:        {},
-	ReasonCloudCredentialsInvalid: {},
-	ReasonRouteServerNotFound:     {},
-	ReasonCUDNSpecInvalid:         {},
+// TerminalDegradedReasons returns condition reasons that must not schedule RequeueAfter.
+func TerminalDegradedReasons() map[string]struct{} {
+	return map[string]struct{}{
+		ReasonInvalidName:             {},
+		ReasonDuplicateNetwork:        {},
+		ReasonCloudCredentialsInvalid: {},
+		ReasonRouteServerNotFound:     {},
+		ReasonCUDNSpecInvalid:         {},
+	}
 }
 
 // IsTerminalDegradedReason reports whether reason must not schedule RequeueAfter.
 func IsTerminalDegradedReason(reason string) bool {
-	_, ok := TerminalDegradedReasons[reason]
+	_, ok := TerminalDegradedReasons()[reason]
 	return ok
 }
 
