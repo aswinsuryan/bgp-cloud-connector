@@ -145,6 +145,13 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ObservedGeneration: config.Generation,
 	})
 
+	config.Status.PeerGroups = nil
+	if config.Spec.Platform == networkingv1alpha1.PlatformManual {
+		meta.RemoveStatusCondition(&config.Status.Conditions, networkingv1alpha1.ConditionCloudEndpointsDiscovered)
+		meta.RemoveStatusCondition(&config.Status.Conditions, networkingv1alpha1.ConditionCloudResourcesReconciled)
+		meta.RemoveStatusCondition(&config.Status.Conditions, networkingv1alpha1.ConditionCompleteNodeInventory)
+	}
+
 	// Build the cloud platform once if configured (used in Phases 3 and 5)
 	var cloudPlatform platform.CloudPlatform
 	var discoveryResult *platform.DiscoveryResult
@@ -164,10 +171,10 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			var credErr *platform.CredentialError
 			if errors.As(err, &credErr) {
 				return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
-					"CloudCredentialsInvalid", credErr.Error())
+					ReasonCloudCredentialsInvalid, credErr.Error())
 			}
 			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
-				"CloudDiscoveryFailed", fmt.Sprintf("failed to build the cloud platform: %v", err))
+				ReasonCloudDiscoveryFailed, fmt.Sprintf("failed to build the cloud platform: %v", err))
 		}
 		cloudPlatform = p
 
@@ -183,7 +190,7 @@ func (r *CUDNBgpConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					ReasonRouteServerNotFound, notFoundErr.Error())
 			}
 			return r.setDegraded(ctx, config, *baselineStatus, networkingv1alpha1.ConditionCloudEndpointsDiscovered,
-				"CloudDiscoveryFailed", fmt.Sprintf("failed to discover cloud BGP endpoints: %v", err))
+				ReasonCloudDiscoveryFailed, fmt.Sprintf("failed to discover cloud BGP endpoints: %v", err))
 		}
 		config.Status.PeerGroups = peerGroupsToStatus(discoveryResult.PeerGroups)
 		meta.SetStatusCondition(&config.Status.Conditions, metav1.Condition{
@@ -528,7 +535,13 @@ func (r *CUDNBgpConfigReconciler) setDegraded(
 	baselineStatus networkingv1alpha1.CUDNBgpConfigStatus,
 	condType, reason, message string,
 ) (ctrl.Result, error) {
-	logf.FromContext(ctx).Error(fmt.Errorf("%s: %s", reason, message), "setting degraded status")
+	log := logf.FromContext(ctx)
+	terminal := IsTerminalDegradedReason(reason)
+	if terminal {
+		log.Info("terminal degraded condition, not requeueing", "reason", reason, "message", message)
+	} else {
+		log.Error(fmt.Errorf("%s: %s", reason, message), "setting degraded status")
+	}
 
 	if err := r.patchConfigStatus(ctx, config, baselineStatus, func(c *networkingv1alpha1.CUDNBgpConfig) {
 		c.Status.Phase = networkingv1alpha1.PhaseDegraded
@@ -541,6 +554,9 @@ func (r *CUDNBgpConfigReconciler) setDegraded(
 		})
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+	if terminal {
+		return ctrl.Result{}, nil
 	}
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
