@@ -46,7 +46,7 @@ metadata:
     capabilities: Basic Install
     categories: Networking
     containerImage: controller:latest
-    createdAt: "2026-08-31T16:17:07Z"
+    createdAt: "2026-09-02T13:43:06Z"
     description: Automates L3 direct routing between CUDN Pod networks and external
       networks via BGP on OpenShift. Cloud platform aware — auto-discovers BGP infrastructure
       on AWS (VPC Route Server) and works on-premise with explicit configuration.
@@ -240,6 +240,7 @@ spec:
                 - --metrics-bind-address=:8443
                 - --leader-elect
                 - --health-probe-bind-address=:8081
+                - --metrics-cert-path=/var/run/secrets/serving-cert
                 command:
                 - /manager
                 env:
@@ -280,6 +281,9 @@ spec:
                   readOnly: true
                 - mountPath: /tmp
                   name: tmp
+                - mountPath: /var/run/secrets/serving-cert
+                  name: metrics-cert
+                  readOnly: true
               securityContext:
                 runAsNonRoot: true
                 seccompProfile:
@@ -295,6 +299,10 @@ spec:
                   - serviceAccountToken:
                       audience: openshift
                       path: token
+              - name: metrics-cert
+                secret:
+                  defaultMode: 420
+                  secretName: bgp-cloud-connector-metrics-tls
       permissions:
       - rules:
         - apiGroups:

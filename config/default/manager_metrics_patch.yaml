@@ -2,3 +2,24 @@
 - op: add
   path: /spec/template/spec/containers/0/args/0
   value: --metrics-bind-address=:8443
+
+# Point the metrics server at the OpenShift service-ca serving certificate.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --metrics-cert-path=/var/run/secrets/serving-cert
+
+# Mount the serving certificate secret minted by the service-ca operator.
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    mountPath: /var/run/secrets/serving-cert
+    name: metrics-cert
+    readOnly: true
+
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: metrics-cert
+    secret:
+      defaultMode: 420
+      secretName: bgp-cloud-connector-metrics-tls
