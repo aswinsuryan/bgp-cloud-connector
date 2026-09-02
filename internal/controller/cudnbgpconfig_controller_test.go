@@ -574,17 +574,24 @@ func TestConfigReconcile_AWSCredentialFailure(t *testing.T) {
 	t.Error("CloudEndpointsDiscovered condition not found")
 }
 
-// TestConfigReconcile_CredentialFailure_ClearsStaleNodeInventory verifies that a
-// stale CompleteNodeInventory=True left by a previous successful reconcile does not
-// survive a later credential failure that returns before Phase 5 runs.
+// TestConfigReconcile_CredentialFailure_ClearsStaleNodeInventory verifies that
+// stale CompleteNodeInventory=True and CloudResourcesReconciled=True left by a
+// previous successful reconcile do not survive a later credential failure that
+// returns before Phase 5 runs.
 func TestConfigReconcile_CredentialFailure_ClearsStaleNodeInventory(t *testing.T) {
 	config := newTestCUDNBgpConfigWithAWS()
 	config.Finalizers = []string{ConfigFinalizerName}
-	// Seed a stale condition as if a previous reconcile had a complete inventory.
+	// Seed stale conditions as if a previous reconcile had reached Phase 5.
 	config.Status.Conditions = []metav1.Condition{{
 		Type:               networkingv1alpha1.ConditionCompleteNodeInventory,
 		Status:             metav1.ConditionTrue,
 		Reason:             "Complete",
+		Message:            "stale from a previous reconcile",
+		LastTransitionTime: metav1.Now(),
+	}, {
+		Type:               networkingv1alpha1.ConditionCloudResourcesReconciled,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Reconciled",
 		Message:            "stale from a previous reconcile",
 		LastTransitionTime: metav1.Now(),
 	}}
@@ -627,6 +634,9 @@ func TestConfigReconcile_CredentialFailure_ClearsStaleNodeInventory(t *testing.T
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == networkingv1alpha1.ConditionCompleteNodeInventory {
 			t.Errorf("expected stale CompleteNodeInventory to be cleared, got %s/%s", cond.Status, cond.Reason)
+		}
+		if cond.Type == networkingv1alpha1.ConditionCloudResourcesReconciled {
+			t.Errorf("expected stale CloudResourcesReconciled to be cleared, got %s/%s", cond.Status, cond.Reason)
 		}
 	}
 }
