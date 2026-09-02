@@ -44,6 +44,53 @@ const (
 	LabelPrimaryUDN   = "k8s.ovn.org/primary-user-defined-network"
 )
 
+// Condition reason constants
+const (
+	// Terminal degraded reasons — no requeue, user action required.
+	ReasonInvalidName             = "InvalidName"
+	ReasonDuplicateNetwork        = "DuplicateNetwork"
+	ReasonCloudCredentialsInvalid = "CloudCredentialsInvalid"
+	ReasonRouteServerNotFound     = "RouteServerNotFound"
+	ReasonCUDNSpecInvalid         = "CUDNSpecInvalid"
+
+	// Transient degraded reasons
+	ReasonPatchFailed          = "PatchFailed"
+	ReasonCheckFailed          = "CheckFailed"
+	ReasonCloudDiscoveryFailed = "CloudDiscoveryFailed"
+	ReasonApplyFailed          = "ApplyFailed"
+	ReasonCloudReconcileFailed = "CloudReconcileFailed"
+	ReasonNamespaceNotReady    = "NamespaceNotReady"
+	ReasonCUDNFailed           = "CUDNFailed"
+	ReasonRAFailed             = "RAFailed"
+
+	// Success / informational reasons
+	ReasonPatched         = "Patched"
+	ReasonWaitingForFRR   = "WaitingForFRR"
+	ReasonFRRReady        = "Ready"
+	ReasonDiscovered      = "Discovered"
+	ReasonApplied         = "Applied"
+	ReasonReconciled      = "Reconciled"
+	ReasonCreated         = "Created"
+	ReasonRoutingCRsExist = "RoutingCRsExist"
+)
+
+// TerminalDegradedReasons returns condition reasons that must not schedule RequeueAfter.
+func TerminalDegradedReasons() map[string]struct{} {
+	return map[string]struct{}{
+		ReasonInvalidName:             {},
+		ReasonDuplicateNetwork:        {},
+		ReasonCloudCredentialsInvalid: {},
+		ReasonRouteServerNotFound:     {},
+		ReasonCUDNSpecInvalid:         {},
+	}
+}
+
+// IsTerminalDegradedReason reports whether reason must not schedule RequeueAfter.
+func IsTerminalDegradedReason(reason string) bool {
+	_, ok := TerminalDegradedReasons()[reason]
+	return ok
+}
+
 var (
 	NetworkGVK = schema.GroupVersionKind{
 		Group: "operator.openshift.io", Version: "v1", Kind: "Network",
