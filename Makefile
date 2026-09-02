@@ -183,7 +183,7 @@ build: manifests generate fmt vet build-operator ## Build manager binary.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+	go run ./cmd/main.go --zap-devel
 
 ##@ Images
 
