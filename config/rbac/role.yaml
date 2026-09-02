@@ -15,6 +15,16 @@ rules:
   - list
   - watch
 - apiGroups:
+  - cloudcredential.openshift.io
+  resources:
+  - credentialsrequests
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
   - config.openshift.io
   resources:
   - infrastructures
@@ -92,3 +102,18 @@ rules:
   - list
   - patch
   - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: openshift-cudn-bgp-routing
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - cudn-bgp-routing-aws-credentials
+  resources:
+  - secrets
+  verbs:
+  - get

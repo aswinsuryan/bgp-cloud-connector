@@ -65,7 +65,7 @@ When a BGP-enabled worker node is replaced (upgrade, spot termination, scaling),
 
 Without platform integration, these require manual intervention (e.g. re-running `terraform apply`). With platform integration, the operator creates and reconciles the cloud-side BGP peering and traffic forwarding for node changes.
 
-Kubernetes has out-of-tree cloud controller managers (e.g. [cloud-provider-aws](https://github.com/kubernetes/cloud-provider-aws)) that implement a broad `cloudprovider.Interface`. This operator uses platform API (e.g. `aws-sdk-go-v2`) directly instead because it only needs a narrow slice of platform functionality (Route Server peers + SourceDestCheck). Importing a full cloud controller manager would bring a large dependency graph for minimal benefit. The architectural pattern (interface-based, per-provider package) is the same. The operator authenticates to AWS via IRSA — the ROSA HCP cluster's pre-configured OIDC provider allows the operator's ServiceAccount to assume an IAM role with short-lived, automatically rotated credentials.
+Kubernetes has out-of-tree cloud controller managers (e.g. [cloud-provider-aws](https://github.com/kubernetes/cloud-provider-aws)) that implement a broad `cloudprovider.Interface`. This operator uses platform API (e.g. `aws-sdk-go-v2`) directly instead because it only needs a narrow slice of platform functionality (Route Server peers + SourceDestCheck). Importing a full cloud controller manager would bring a large dependency graph for minimal benefit. The architectural pattern (interface-based, per-provider package) is the same. The operator gets its AWS credentials either from the pod, where a webhook has already injected them, or from the cluster, by asking the cloud credential operator for its own -- see [AWS authentication](#aws-authentication). Both are short-lived and rotated, and neither stores anything static.
 
 ### AWS Platform
 
@@ -73,7 +73,7 @@ When AWS platform integration is configured, the operator performs additional ac
 
 | Action | AWS API calls | Trigger |
 |:---|:---|:---|
-| Verify credentials | `sts:GetCallerIdentity` | Every reconcile (before any EC2 calls); credentials obtained via IRSA |
+| Verify credentials | `sts:GetCallerIdentity` | Every reconcile (before any EC2 calls); credentials resolved as described in [AWS authentication](#aws-authentication) |
 | Discover Route Server infrastructure | `DescribeRouteServers`, `DescribeRouteServerEndpoints`, `DescribeSubnets` | Every reconcile (before FRR configuration) |
 | Reconcile Route Server peers | `DescribeRouteServerPeers`, `CreateRouteServerPeer`, `DeleteRouteServerPeer`, `CreateTags` | BGP-enabled worker node added, removed, or IP changed |
 | Disable SourceDestCheck | `DescribeInstances`, `ModifyNetworkInterfaceAttribute` | New BGP-enabled worker node detected |
@@ -82,11 +82,30 @@ When AWS platform integration is configured, the operator performs additional ac
 
 Route Server peers are created **per-AZ** — each BGP-enabled worker node is peered with its local AZ's Route Server endpoints. Peers are tagged with `managed-by: cudn-bgp-routing-operator/<infrastructureName>` for lifecycle management, where `<infrastructureName>` is read automatically from the OpenShift `Infrastructure/cluster` object (`status.infrastructureName`). This cluster-scoped tag ensures multiple clusters sharing the same VPC Route Server do not interfere with each other's peers. If a peer already exists at a desired IP but was not created by the operator (e.g. created manually or by Terraform), the operator adopts it by adding the `managed-by` tag rather than attempting to create a duplicate.
 
-#### AWS authentication (IRSA)
+#### AWS authentication
 
-The operator authenticates to AWS using IAM Roles for Service Accounts (IRSA). ROSA HCP clusters have an OIDC provider pre-configured, so the operator's ServiceAccount can assume an IAM role directly — no static credentials or Secrets are needed.
+The operator gets its AWS credentials in one of two ways, and works out which by asking the AWS SDK whether the pod already has any.
 
-**The cluster admin must complete the following steps before creating the `CUDNBgpConfig` CR with `spec.aws`:**
+**Where the pod has credentials.** On ROSA, and on any cluster where you have annotated the operator's ServiceAccount with an IAM role ARN, the pod identity webhook injects a web identity token at pod creation and the SDK's default chain resolves it. Nothing static is stored and the operator asks the cluster for nothing. The steps below set this up.
+
+**Where it does not.** The operator creates a `CredentialsRequest` named `cudn-bgp-routing-aws` for itself, carrying exactly the permissions in the table above, and reads the `credentials` key of the secret the cloud credential operator writes into its own namespace. That key is a shared-credentials ini file, and CCO writes one whatever mode the cluster is in, which is why this single path serves both kinds:
+
+- **A cluster that mints** (ordinary IPI, `credentialsMode` unset or `Mint`) needs nothing set up. CCO creates an IAM user and puts its key pair in the secret. The `CUDNBgpConfig` reports `CloudEndpointsDiscovered=False` with reason `WaitingForCloudCredentials` for the few seconds this takes, then proceeds.
+- **A cluster that federates** (`credentialsMode: Manual` with an OIDC provider, which is what `ccoctl` installs) cannot mint anything. Give the operator an IAM role ARN in the `ROLEARN` environment variable and it adds `stsIAMRoleARN` and `cloudTokenPath` to its request; CCO then writes a secret naming that role and the token this operator projects at `/var/run/secrets/openshift/serviceaccount/token`. Installing from OperatorHub, the console prompts for the role ARN and sets `ROLEARN` for you, because the CSV declares `features.operators.openshift.io/token-auth-aws`. Installing by hand, put it in the Subscription:
+
+  ```yaml
+  spec:
+    config:
+      env:
+      - name: ROLEARN
+        value: arn:aws:iam::<account>:role/<role>
+  ```
+
+  The role itself has to exist first, and only you can create it -- the operator has no credentials with which to create a role for itself. Its trust policy is the same shape as Step 1 below.
+
+Setting `ROLEARN` after the operator has already asked is fine: it reconciles its own `CredentialsRequest` rather than only creating it, so the role ARN is picked up on the next pass.
+
+**For IRSA, the cluster admin must complete the following steps before creating the `CUDNBgpConfig` CR with `spec.aws`:**
 
 **Step 1 — Create an IAM role with a trust policy for the operator's ServiceAccount:**
 
@@ -540,7 +559,7 @@ Phase 2: Wait for FRR
           │
           ▼
 Phase 3: Discover Route Server Infrastructure (if spec.aws configured)
-  ├── Verify AWS credentials via IRSA (sts:GetCallerIdentity)
+  ├── Verify AWS credentials (sts:GetCallerIdentity)
   ├── For each spec.aws.routeServerIDs[]:
   │     • DescribeRouteServers → AmazonSideAsn (remote ASN)
   │     • DescribeRouteServerEndpoints → endpoint IDs, ENI addresses, subnet IDs
@@ -633,7 +652,8 @@ Both CRs use the same phase enum. `CUDNBgpRouting` follows `Pending` → `Config
 |:---|:---|:---|
 | `NetworkOperatorPatched` | `PatchFailed` | Failed to patch `Network.operator.openshift.io/cluster` |
 | `FRRNamespaceReady` | `CheckFailed` | Error checking FRR readiness (distinct from simply waiting) |
-| `CloudEndpointsDiscovered` | `CloudCredentialsInvalid` | IRSA credentials not available or `sts:GetCallerIdentity` verification failed (check ServiceAccount annotation and IAM role trust policy) |
+| `CloudEndpointsDiscovered` | `CloudCredentialsInvalid` | Credentials were found but `sts:GetCallerIdentity` failed (check the IAM role trust policy, or the secret CCO wrote). A freshly minted IAM key can fail this for a few seconds before it propagates; the reconcile requeues after 30s and it clears |
+| `CloudEndpointsDiscovered` | `WaitingForCloudCredentials` | The cluster has been asked for credentials and has not yet provided them. Not `Degraded`: the CR stays `Configuring` and requeues every 10 seconds. If it never clears on a `Manual` cluster, `ROLEARN` is unset -- CCO ignores a request without `stsIAMRoleARN` |
 | `CloudEndpointsDiscovered` | `CloudDiscoveryFailed` | Failed to build the AWS platform client (e.g. Infrastructure name unavailable) or to discover Route Server endpoints (invalid Route Server ID, insufficient IAM permissions) |
 | `FRRConfigurationApplied` | `ApplyFailed` | Failed to create/update one or more FRRConfigurations |
 | `CloudResourcesReconciled` | `CloudReconcileFailed` | Failed to reconcile Route Server peers or disable source/dest check |
@@ -744,7 +764,7 @@ oc rollout restart deployment/openshift-cudn-bgp-routing-controller-manager -n o
 
 5. Create the CRs for your environment:
 
-   **For ROSA HCP:** provision AWS infrastructure first with [rosa-bgp Terraform](https://github.com/msemanrh/rosa-bgp), set up the IRSA IAM role (see [AWS authentication](#aws-authentication-irsa)), then create the CR with Route Server IDs and BGP ASN from `terraform output`. The operator auto-discovers all Route Server endpoints, neighbor IPs, and remote ASN:
+   **For ROSA HCP:** provision AWS infrastructure first with [rosa-bgp Terraform](https://github.com/msemanrh/rosa-bgp), set up the IRSA IAM role (see [AWS authentication](#aws-authentication)), then create the CR with Route Server IDs and BGP ASN from `terraform output`. The operator auto-discovers all Route Server endpoints, neighbor IPs, and remote ASN:
 
    ```bash
    $EDITOR config/samples/networking_v1alpha1_cudnbgpconfig.yaml # Add needed Terraform outputs
