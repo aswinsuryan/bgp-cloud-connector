@@ -1,261 +1,132 @@
 #!/usr/bin/env bash
 #
-# Entry point for the e2e-aws prow job.
+# Entry point for the e2e-aws prow job: run the test, capture what it
+# said, then tear down whatever is there. Always.
 #
-# The job definition in openshift/release is deliberately one line --
-# it runs this file and nothing else -- so that everything about what
-# the test does can be changed here, with a normal pull request in this
-# repository, instead of a round trip through the release repo.
+#   hack/ci-e2e-aws.sh
 #
-# What runs today: stand up the AWS VPC route server estate the
-# operator expects to discover, report it, and tear it down again. The
-# operator discovers route servers and endpoints, it never creates
-# them, so something has to go first. Enabling FRR, deploying the
-# operator and running the e2e suite are the next things to land here.
+# The sequencing is ours rather than ci-operator's for two reasons.
 #
-# Locally, against a cluster you already have:
+# A test that specifies post steps overrides the workflow's post rather
+# than adding to it -- see mergeWorkflow in ci-tools' registry resolver
+# -- so a teardown expressed that way would replace ipi-aws-post and
+# take the cluster deprovision with it. Leaking a route server is the
+# problem we are solving; leaking the whole cluster would be a worse
+# one.
 #
-#   KUBECONFIG=<cluster>/auth/kubeconfig AWS_PROFILE=<profile> hack/ci-e2e-aws.sh
+# And the order has to be ours anyway. Route server endpoints sit in the
+# subnets the installer wants to delete, so they have to go before the
+# cluster is deprovisioned, not after.
+#
+# The two halves know nothing about each other. ci-e2e-aws-run.sh
+# creates and never removes, ci-e2e-aws-teardown.sh removes and never
+# creates, and this file is the only place that says "always".
 
 set -o nounset
-set -o errexit
 set -o pipefail
+# Deliberately no errexit: running the teardown after a failed test is
+# the entire job of this file, and errexit would exit before it.
 
-# In prow the cluster profile supplies the credentials and the install
-# leaves a kubeconfig behind. Run outside prow and whatever is already
-# in the environment is used instead, which is what makes this testable
-# without waiting forty minutes for a cluster.
-if [[ -n "${CLUSTER_PROFILE_DIR:-}" ]]; then
-    export AWS_SHARED_CREDENTIALS_FILE="${CLUSTER_PROFILE_DIR}/.awscred"
-fi
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=hack/lib/ci.sh
+source "${here}/lib/ci.sh"
 
-if [[ -n "${SHARED_DIR:-}" && -f "${SHARED_DIR}/kubeconfig" ]]; then
-    export KUBECONFIG="${SHARED_DIR}/kubeconfig"
-fi
+teardown_done=false
 
-# shellcheck source=hack/lib/retry.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/retry.sh"
+# Read the cluster's identity once, here, before anything is created,
+# and hand it to the teardown. Without it the teardown asks the cluster
+# who it is, and a cluster that has stopped answering by then takes the
+# cloud cleanup down with it -- which is the one failure this file
+# exists to prevent. Failing here instead costs nothing: nothing has
+# been built yet.
+ci_bootstrap
+trap ci_remove_workdir EXIT
 
-workdir="$(mktemp -d)"
-trap 'rm -rf "${workdir}"' EXIT
+require_cmd aws oc setsid
+require_cluster
+require_platform AWS
+require_aws
+aws_cluster_facts
 
-# The src image carries the Go toolchain and, with cli: latest, oc. It
-# has no aws CLI, and the route server commands need v2.34.7 or newer,
-# so v1 from pip will not do. Fetching it here rather than asking for a
-# different image keeps the release-repo side unaware of the
-# dependency.
-install_aws_cli() {
-    local zip="${workdir}/awscliv2.zip"
-
-    echo "Fetching the aws CLI..."
-    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "${zip}"
-
-    if command -v unzip >/dev/null 2>&1; then
-        unzip -q "${zip}" -d "${workdir}"
-    elif command -v python3 >/dev/null 2>&1; then
-        # The builder image is not guaranteed to carry unzip, and the
-        # failure would otherwise be a bare "command not found" a long
-        # way from the cause.
-        python3 -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
-            "${zip}" "${workdir}"
-        chmod -R +x "${workdir}/aws"
-    else
-        echo "neither unzip nor python3 is available to unpack the aws CLI" >&2
-        exit 1
+# The teardown is idempotent and treats "nothing there" as success, so
+# running it after a test that failed before creating anything costs one
+# API call and reports done. That is what lets this be unconditional
+# rather than conditional on how far the test got.
+run_teardown() {
+    if [[ "${teardown_done}" == true ]]; then
+        return 0
     fi
-
-    "${workdir}/aws/install" -i "${workdir}/aws-cli" -b "${workdir}/bin"
-    export PATH="${workdir}/bin:${PATH}"
+    teardown_done=true
+    info "--- teardown ---"
+    INFRA="${infra}" AWS_REGION="${region}" "${here}/ci-e2e-aws-teardown.sh"
 }
 
-if ! command -v aws >/dev/null 2>&1; then
-    install_aws_cli
+# Prow signals rather than exits, and bash runs no EXIT trap when an
+# untrapped signal kills the shell. A trap is not a guarantee -- once
+# the grace period is up the next signal is KILL and nothing runs -- but
+# it converts the ordinary cancellation into a clean teardown, and the
+# resources bill by the hour.
+test_pid=0
+
+# Invoked from the traps below.
+# shellcheck disable=SC2329
+on_signal() {
+    warn "--- caught SIG$1, tearing down before exiting ---"
+    # The whole test group, not just the pid we started. ci-e2e-aws-run.sh
+    # is a sequence of other scripts, and killing only it orphans whichever
+    # one is running rather than stopping it: the teardown then deletes an
+    # estate that a create it cannot see is still adding to. Observed --
+    # six endpoints and seven propagations were created after the teardown
+    # had begun. setsid put the test in its own group so this signal
+    # reaches all of it and none of us.
+    if (( test_pid > 0 )); then
+        kill -TERM -"${test_pid}" 2>/dev/null || true
+        wait "${test_pid}" 2>/dev/null || true
+    fi
+    if ! run_teardown; then
+        warn "--- teardown reported a failure; see its output above ---"
+    fi
+    exit "$2"
+}
+trap 'on_signal TERM 143' TERM
+trap 'on_signal INT 130' INT
+
+info "--- test ---"
+test_rc=0
+# Backgrounded, not because anything runs concurrently, but because bash
+# defers a trap until the foreground command finishes. Signalled at this
+# pid alone, which is how a cleanup that knows only the pid it started
+# does it, a foreground test runs to completion first and the whole
+# grace period is spent before the teardown begins. Waiting on a
+# background child is interruptible, so the trap fires when the signal
+# arrives and hands the remaining time to the teardown.
+#
+# In its own process group, so on_signal can stop the test and everything
+# it has spawned without stopping this script, which still has the
+# teardown to run. setsid is not a group leader when the shell starts it
+# without job control, so the exec succeeds and the new group id is the
+# pid recorded here.
+setsid "${here}/ci-e2e-aws-run.sh" &
+test_pid=$!
+wait "${test_pid}" || test_rc=$?
+test_pid=0
+if (( test_rc == 0 )); then
+    info "OK   test passed"
+else
+    warn "test FAILED, exit ${test_rc}"
 fi
 
-command -v oc >/dev/null 2>&1 || { echo "oc is not on PATH" >&2; exit 1; }
-oc whoami >/dev/null 2>&1 || { echo "not connected to a cluster; set KUBECONFIG" >&2; exit 1; }
-
-infra="$(oc get infrastructure cluster -o jsonpath='{.status.infrastructureName}')"
-region="$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.aws.region}')"
-export AWS_REGION="${region}"
-export AWS_DEFAULT_REGION="${region}"
-
-echo "cluster:  ${infra}"
-echo "region:   ${region}"
-# Called but not printed. Prow logs for openshift repositories are
-# public, and the ARN carries the account id and the principal name.
-# It still has to succeed: it is the cheapest check that the
-# credentials work at all, and it is what the operator itself does.
-aws sts get-caller-identity >/dev/null
-echo "aws cli:  $(aws --version 2>&1)"
-
-# Ask before creating anything. An API the region does not offer and an
-# API this account may not call are different answers, and a failed
-# create cannot tell them apart. The error text is the distinction.
-if ! describe_out="$(aws ec2 describe-route-servers 2>&1)"; then
-    echo "FAIL describe-route-servers"
-    echo "${describe_out}"
-    exit 1
-fi
-echo "OK   describe-route-servers"
-
-vpc="$(aws ec2 describe-vpcs \
-    --filters "Name=tag:kubernetes.io/cluster/${infra},Values=owned" \
-    --query 'Vpcs[0].VpcId' --output text)"
-if [[ "${vpc}" == "None" || -z "${vpc}" ]]; then
-    echo "no VPC tagged kubernetes.io/cluster/${infra}=owned" >&2
-    exit 1
+teardown_rc=0
+run_teardown || teardown_rc=$?
+if (( teardown_rc != 0 )); then
+    warn "--- teardown FAILED: cloud resources may still be up ---"
 fi
 
-subnet="$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=${vpc}" \
-    --query 'Subnets[0].SubnetId' --output text)"
-route_table="$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=${vpc}" \
-    --query 'RouteTables[0].RouteTableId' --output text)"
-
-if [[ "${subnet}" == "None" || "${route_table}" == "None" ]]; then
-    echo "vpc ${vpc} has no usable subnet (${subnet}) or route table (${route_table})" >&2
-    exit 1
+# The test's verdict wins, because that is what the job is reporting on.
+# A teardown failure only decides the outcome when there was nothing
+# else wrong -- but it does decide it, because resources left running
+# are not a pass.
+if (( test_rc != 0 )); then
+    exit "${test_rc}"
 fi
-
-echo "vpc:      ${vpc}"
-echo "subnet:   ${subnet}"
-echo "table:    ${route_table}"
-
-# None of these resources has an aws ec2 wait, so every wait polls
-# describe. A failed describe is a failed poll, never an empty answer,
-# or expired credentials read as "it has gone" and the delete that
-# follows hits a resource still standing.
-wait_until() {
-    local what="$1" attempts="$2"; shift 2
-    local i
-    for (( i = 1; i <= attempts; i++ )); do
-        if "$@"; then
-            return 0
-        fi
-        sleep 10
-    done
-    echo "timed out waiting for ${what}" >&2
-    return 1
-}
-
-route_server_available() {
-    local state
-    state="$(aws ec2 describe-route-servers --route-server-ids "${1}" \
-        --query 'RouteServers[0].State' --output text 2>/dev/null)" || return 1
-    [[ "${state}" == "available" ]]
-}
-
-# Deleting an endpoint that is still pending is rejected as
-# IncorrectState, so the teardown needs it to have settled first, and
-# an endpoint that comes up is a stronger answer than one that was
-# merely accepted.
-endpoint_available() {
-    local state
-    state="$(aws ec2 describe-route-server-endpoints --route-server-endpoint-ids "${1}" \
-        --query 'RouteServerEndpoints[0].State' --output text 2>/dev/null)" || return 1
-    [[ "${state}" == "available" ]]
-}
-
-route_server=""
-endpoint=""
-propagated=false
-associated=false
-cleaned_up=false
-
-# Endpoints bill hourly and belong to the VPC rather than the cluster,
-# so the deprovision step will not reclaim them. Prow signals rather
-# than exits, and bash does not run an EXIT trap when an untrapped
-# signal kills the shell, hence TERM and INT here -- and hence the
-# guard, now that cleanup can be reached both ways.
-cleanup() {
-    local rc=${1:-$?}
-    if [[ "${cleaned_up}" == true ]]; then
-        return
-    fi
-    cleaned_up=true
-    set +o errexit
-
-    local teardown_rc=0
-    echo "--- teardown ---"
-    if [[ -n "${endpoint}" ]]; then
-        retry_on_incorrect_state "delete endpoint ${endpoint}" 300 \
-            aws ec2 delete-route-server-endpoint --route-server-endpoint-id "${endpoint}" \
-            || teardown_rc=1
-    fi
-    if [[ "${propagated}" == true ]]; then
-        retry_on_incorrect_state "disable propagation to ${route_table}" 300 \
-            aws ec2 disable-route-server-propagation \
-            --route-server-id "${route_server}" --route-table-id "${route_table}" \
-            || teardown_rc=1
-    fi
-    # Blocked by both the propagation and the endpoint, so it gets the
-    # largest budget: it is where the wait actually lands.
-    if [[ "${associated}" == true ]]; then
-        retry_on_incorrect_state "disassociate from ${vpc}" 600 \
-            aws ec2 disassociate-route-server \
-            --route-server-id "${route_server}" --vpc-id "${vpc}" \
-            || teardown_rc=1
-    fi
-    if [[ -n "${route_server}" ]]; then
-        retry_on_incorrect_state "delete route server ${route_server}" 300 \
-            aws ec2 delete-route-server --route-server-id "${route_server}" \
-            || teardown_rc=1
-    fi
-    if (( teardown_rc != 0 )); then
-        echo "--- teardown FAILED: cloud resources may have been left behind ---" >&2
-        if (( rc == 0 )); then
-            rc=1
-        fi
-    else
-        echo "--- teardown done ---"
-    fi
-
-    rm -rf "${workdir}"
-    exit "${rc}"
-}
-trap cleanup EXIT
-trap 'cleanup 130' INT
-trap 'cleanup 143' TERM
-
-# 65000 is what the hacks scripts use for the Amazon side, and it has
-# to differ from the localASN a CUDNBgpConfig carries or the session is
-# not eBGP. Nothing peers yet, so it only has to be well formed.
-echo "creating route server..."
-route_server="$(aws ec2 create-route-server \
-    --amazon-side-asn 65000 \
-    --tag-specifications "ResourceType=route-server,Tags=[{Key=Name,Value=${infra}-rs}]" \
-    --query 'RouteServer.RouteServerId' --output text)"
-echo "OK   create-route-server ${route_server}"
-wait_until "route server to become available" 60 route_server_available "${route_server}"
-
-retry_on_incorrect_state "associate with ${vpc}" 300 \
-    aws ec2 associate-route-server --route-server-id "${route_server}" --vpc-id "${vpc}"
-associated=true
-echo "OK   associate-route-server ${vpc}"
-
-endpoint="$(retry_on_incorrect_state "create endpoint" 300 \
-    aws ec2 create-route-server-endpoint \
-    --route-server-id "${route_server}" \
-    --subnet-id "${subnet}" \
-    --tag-specifications "ResourceType=route-server-endpoint,Tags=[{Key=Name,Value=${infra}-rs-ep}]" \
-    --query 'RouteServerEndpoint.RouteServerEndpointId' --output text)"
-echo "OK   create-route-server-endpoint ${endpoint}"
-wait_until "endpoint to become available" 60 endpoint_available "${endpoint}"
-
-# Propagation is the one that hides: without it every peer reaches
-# available and every session establishes while nothing in the VPC can
-# reach a pod.
-retry_on_incorrect_state "enable propagation to ${route_table}" 300 \
-    aws ec2 enable-route-server-propagation \
-    --route-server-id "${route_server}" --route-table-id "${route_table}"
-propagated=true
-echo "OK   enable-route-server-propagation ${route_table}"
-
-echo "--- the estate the operator would discover ---"
-aws ec2 describe-route-servers --route-server-ids "${route_server}" --output table
-aws ec2 describe-route-server-endpoints \
-    --query "RouteServerEndpoints[?RouteServerId=='${route_server}']" --output table
-aws ec2 get-route-server-associations --route-server-id "${route_server}" --output table
-aws ec2 get-route-server-propagations --route-server-id "${route_server}" --output table
-
-echo "estate stood up successfully"
+exit "${teardown_rc}"

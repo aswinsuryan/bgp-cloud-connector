@@ -138,7 +138,33 @@ test: manifests generate fmt vet ## Run platform-independent unit tests.
 
 .PHONY: test-scripts
 test-scripts: ## Run unit tests for the shell under hack/.
-	./hack/ci-e2e-aws-test.sh
+	./hack/lib-test.sh
+
+##@ CI jobs
+
+# The prow jobs, runnable here. Named ci- rather than e2e- to keep them
+# apart from test-e2e-aws above, which runs the Go suite against a
+# cluster somebody else configured; these run the whole job, including
+# standing that cluster's estate up and tearing it down. One target per
+# platform, each depending on the CLI its scripts need, so Azure and GCP
+# slot in beside this as their scripts land.
+.PHONY: ci-e2e-aws
+ci-e2e-aws: bin/aws ## Run the AWS e2e job: stand the estate up, then tear it down.
+	./hack/ci-e2e-aws.sh
+
+.PHONY: ci-e2e-aws-teardown
+ci-e2e-aws-teardown: bin/aws ## Remove whatever an AWS e2e run left behind.
+	./hack/ci-e2e-aws-teardown.sh
+
+# A file target, so once something has been downloaded there is nothing
+# left to do. The script decides whether to download at all: with a new
+# enough aws already on PATH it installs nothing and this file is never
+# created, so on a machine that packages the CLI the rule re-runs every
+# time and costs a version check. That is the intended outcome, not an
+# oversight -- the archive AWS ships is linked for a generic Linux and
+# would not run here anyway.
+bin/aws: | $(LOCALBIN)
+	./hack/aws/ensure-cli.sh $(LOCALBIN) >/dev/null
 
 .PHONY: test-aws
 test-aws: ## Run AWS platform unit tests (mocked, no credentials needed).
@@ -147,14 +173,14 @@ test-aws: ## Run AWS platform unit tests (mocked, no credentials needed).
 .PHONY: test-e2e
 test-e2e: ## Run shared e2e tests (requires cluster + external BGP peer). Usage: make test-e2e <profile>
 	$(eval E2E_PROFILE := $(filter-out $@,$(MAKECMDGOALS)))
-	@[ -n "$(E2E_PROFILE)" ] || { echo "Usage: make test-e2e <profile-name>"; exit 1; }
+	@[ -n "$(E2E_PROFILE)$(E2E_MANIFEST_DIR)" ] || { echo "Usage: make test-e2e <profile-name>, or set E2E_MANIFEST_DIR"; exit 1; }
 	E2E_PROFILE=$(E2E_PROFILE) go test ./test/e2e/ -v -timeout 30m -count=1
 
 .PHONY: test-e2e-aws
 test-e2e-aws: ## Run AWS e2e tests (requires cluster + IRSA configured). Usage: make test-e2e-aws <profile>
 	$(eval E2E_PROFILE := $(filter-out $@,$(MAKECMDGOALS)))
-	@[ -n "$(E2E_PROFILE)" ] || { echo "Usage: make test-e2e-aws <profile-name>"; exit 1; }
-	E2E_PROFILE=$(E2E_PROFILE) go test ./test/e2e/aws/ -v -timeout 30m -count=1
+	@[ -n "$(E2E_PROFILE)$(E2E_MANIFEST_DIR)" ] || { echo "Usage: make test-e2e-aws <profile-name>, or set E2E_MANIFEST_DIR"; exit 1; }
+	E2E_PROFILE=$(E2E_PROFILE) go test ./test/e2e/aws/ -v -timeout 60m -count=1
 
 .PHONY: lint
 lint: ## Run golangci-lint linter
@@ -272,7 +298,15 @@ $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
 ## Tool Binaries
-KUBECTL ?= kubectl
+# kubectl when it is installed, otherwise oc. The image the CI jobs run
+# in carries oc, from `cli: latest`, and no kubectl at all, so a bare
+# kubectl default fails there -- and it fails after kustomize has
+# rendered the manifests, so it reads like a kustomize problem rather
+# than a missing client. oc is a superset for the apply and delete these
+# targets do. Falls back to the name itself so that a machine with
+# neither still says "kubectl: command not found" rather than running an
+# empty command. Override with KUBECTL=<path> as before.
+KUBECTL ?= $(shell command -v kubectl 2>/dev/null || command -v oc 2>/dev/null || echo kubectl)
 KUSTOMIZE ?= go tool kustomize
 CONTROLLER_GEN ?= go tool controller-gen
 ENVTEST ?= go tool setup-envtest

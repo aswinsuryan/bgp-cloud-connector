@@ -27,7 +27,7 @@ const (
 
 // NetworkConfig defines a network to be created and advertised via BGP.
 //
-// +kubebuilder:validation:XValidation:rule="self.subnets.all(s, s.isCIDR())",message="each subnet must be a valid CIDR (e.g. 10.0.0.0/16 or 2001:db8::/64)"
+// +kubebuilder:validation:XValidation:rule="self.subnets.all(s, isCIDR(s))",message="each subnet must be a valid CIDR (e.g. 10.0.0.0/16 or 2001:db8::/64)"
 type NetworkConfig struct {
 	// Name identifies the network. The operator creates a ClusterUserDefinedNetwork
 	// named cluster-udn-<name> that selects namespaces with label cluster-udn: <name>.

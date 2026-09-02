@@ -82,7 +82,7 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: each subnet must be a valid CIDR (e.g. 10.0.0.0/16 or 2001:db8::/64)
-                  rule: self.subnets.all(s, s.isCIDR())
+                  rule: self.subnets.all(s, isCIDR(s))
             required:
             - network
             type: object

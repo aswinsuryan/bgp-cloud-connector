@@ -62,16 +62,26 @@ func TestAWSE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	// E2E_MANIFEST_DIR takes an absolute path and skips the profile
+	// lookup entirely. A profile has to be a directory under
+	// test/e2e/manifests, which is fine for one checked in by hand and
+	// wrong for one generated per run: the route server id is minted
+	// while the job is running, so the manifest cannot be written until
+	// then, and it has no business being written into the source tree.
+	manifestDir := os.Getenv("E2E_MANIFEST_DIR")
 	profile := os.Getenv("E2E_PROFILE")
-	Expect(profile).NotTo(BeEmpty(), "E2E_PROFILE must be set (e.g. make test-e2e-aws my-cluster)")
-	manifestDir := filepath.Join("..", "..", "..", "test", "e2e", "manifests", profile)
+	if manifestDir == "" {
+		Expect(profile).NotTo(BeEmpty(),
+			"set E2E_PROFILE (e.g. make test-e2e-aws my-cluster) or E2E_MANIFEST_DIR")
+		manifestDir = filepath.Join("..", "..", "..", "test", "e2e", "manifests", profile)
+	}
 
-	By("loading CUDNBgpConfig manifest from profile " + profile)
+	By("loading CUDNBgpConfig manifest from " + manifestDir)
 	bgpConfig = &networkingv1alpha1.CUDNBgpConfig{}
 	loadManifest(filepath.Join(manifestDir, "cudnbgpconfig.yaml"), bgpConfig)
 	Expect(bgpConfig.Spec.AWS).NotTo(BeNil(), "profile CUDNBgpConfig must have spec.aws")
 
-	By("loading CUDNBgpRouting manifest from profile " + profile)
+	By("loading CUDNBgpRouting manifest from " + manifestDir)
 	bgpRouting = &networkingv1alpha1.CUDNBgpRouting{}
 	loadManifest(filepath.Join(manifestDir, "cudnbgprouting.yaml"), bgpRouting)
 
@@ -153,6 +163,13 @@ func addUnstructuredTypes(s *runtime.Scheme) {
 	}
 }
 
+// listManagedPeers returns the peers this operator owns on an endpoint, and
+// only those that still exist.
+//
+// EC2 goes on returning a peer after it has been deleted, so filtering on the
+// managed-by tag alone counts corpses. That cuts both ways: it makes "the
+// peers were deleted" fail on peers that were, and it makes "peers exist per
+// AZ" pass on peers that do not.
 func listManagedPeers(ctx context.Context, endpointID string) ([]ec2types.RouteServerPeer, error) {
 	out, err := ec2Client.DescribeRouteServerPeers(ctx, &ec2.DescribeRouteServerPeersInput{})
 	if err != nil {
@@ -161,6 +178,9 @@ func listManagedPeers(ctx context.Context, endpointID string) ([]ec2types.RouteS
 	var filtered []ec2types.RouteServerPeer
 	for _, peer := range out.RouteServerPeers {
 		if aws.ToString(peer.RouteServerEndpointId) != endpointID {
+			continue
+		}
+		if peer.State == ec2types.RouteServerPeerStateDeleted {
 			continue
 		}
 		for _, t := range peer.Tags {

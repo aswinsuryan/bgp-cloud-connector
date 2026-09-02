@@ -183,8 +183,13 @@ func main() {
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "5914cf41.openshift.io",
+		// Keeps secrets out of the cache, so the one the operator
+		// reads comes from the API server and the Role can name it
+		// rather than permitting the whole namespace. See
+		// controller.ClientOptions.
+		Client:           controller.ClientOptions(),
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: "5914cf41.openshift.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

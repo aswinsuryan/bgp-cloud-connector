@@ -47,6 +47,9 @@ const (
 
 	reconcileTimeout = 6 * time.Minute
 	pollInterval     = 10 * time.Second
+	// A route server peer takes minutes to reach available, and EC2 refuses
+	// state-changing calls on one that has not.
+	peerSettleTimeout = 15 * time.Minute
 )
 
 var _ = Describe("AWS E2E", Ordered, func() {
@@ -243,18 +246,28 @@ var _ = Describe("AWS E2E", Ordered, func() {
 	// ---------------------------------------------------------------
 	Context("E2E-AWS-03: Route Server peer manually deleted", func() {
 		It("should recreate the deleted peer within the reconcile window", func(ctx context.Context) {
-			By("finding a managed peer to delete")
-			peers, err := allManagedPeers(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(peers).NotTo(BeEmpty())
-
-			victim := peers[0]
-			victimID := aws.ToString(victim.RouteServerPeerId)
-			victimIP := aws.ToString(victim.PeerAddress)
+			// EC2 refuses a delete on a peer that has not finished being
+			// created, so this waits for one to settle rather than taking
+			// whichever comes back first. Creation takes minutes, and the
+			// previous spec has only just made these.
+			By("waiting for a managed peer to reach available")
+			var victimID, victimIP string
+			Eventually(func(g Gomega) {
+				peers, err := allManagedPeers(ctx)
+				g.Expect(err).NotTo(HaveOccurred(), "failed to list managed peers")
+				for _, peer := range peers {
+					if peer.State == ec2types.RouteServerPeerStateAvailable {
+						victimID = aws.ToString(peer.RouteServerPeerId)
+						victimIP = aws.ToString(peer.PeerAddress)
+						return
+					}
+				}
+				g.Expect(victimID).NotTo(BeEmpty(), "no managed peer has reached available yet")
+			}).WithTimeout(peerSettleTimeout).WithPolling(pollInterval).Should(Succeed())
 			GinkgoWriter.Printf("deleting peer %s (IP %s)\n", victimID, victimIP)
 
 			By("deleting the peer via EC2 API")
-			_, err = ec2Client.DeleteRouteServerPeer(ctx, &ec2.DeleteRouteServerPeerInput{
+			_, err := ec2Client.DeleteRouteServerPeer(ctx, &ec2.DeleteRouteServerPeerInput{
 				RouteServerPeerId: aws.String(victimID),
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -262,11 +275,18 @@ var _ = Describe("AWS E2E", Ordered, func() {
 			By("waiting for operator to recreate it")
 			Eventually(func(g Gomega) {
 				peers, err := allManagedPeers(ctx)
-				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(err).NotTo(HaveOccurred(), "failed to list managed peers")
 
+				// Address alone is not enough. listManagedPeers keeps
+				// peers in Deleting, so the one just deleted is still
+				// listed under the same address and this would match it
+				// and pass without the operator having done anything.
+				// The replacement is a different peer id, and available.
 				found := false
 				for _, p := range peers {
-					if aws.ToString(p.PeerAddress) == victimIP {
+					if aws.ToString(p.PeerAddress) == victimIP &&
+						aws.ToString(p.RouteServerPeerId) != victimID &&
+						p.State == ec2types.RouteServerPeerStateAvailable {
 						found = true
 						break
 					}
