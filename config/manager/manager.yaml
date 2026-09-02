@@ -5,6 +5,8 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: openshift-cudn-bgp-routing
     app.kubernetes.io/managed-by: kustomize
+    # Let the OpenShift platform Prometheus discover ServiceMonitors here.
+    openshift.io/cluster-monitoring: "true"
   name: system
 ---
 apiVersion: apps/v1

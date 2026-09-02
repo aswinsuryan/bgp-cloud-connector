@@ -1,0 +1,18 @@
+# Allows the platform Prometheus to discover the metrics Service endpoints in
+# the operator's namespace so it can scrape them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-k8s
+  namespace: system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - services
+  - endpoints
+  - pods
+  verbs:
+  - get
+  - list
+  - watch

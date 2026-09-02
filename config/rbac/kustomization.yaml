@@ -19,6 +19,11 @@ resources:
 - metrics_auth_role.yaml
 - metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
+# Allow the platform Prometheus (openshift-monitoring/prometheus-k8s) to
+# discover and scrape the operator's metrics endpoint.
+- metrics_reader_prometheus_binding.yaml
+- prometheus_k8s_role.yaml
+- prometheus_k8s_role_binding.yaml
 # For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
 # default, aiding admins in cluster management. Those roles are
 # not used by the openshift-cudn-bgp-routing itself. You can comment the following lines

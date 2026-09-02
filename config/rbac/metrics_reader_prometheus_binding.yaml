@@ -1,0 +1,15 @@
+# Grants the platform Prometheus service account permission to scrape the
+# operator's /metrics endpoint. The metrics FilterProvider authorizes scrape
+# requests with a SubjectAccessReview against this 'metrics-reader' ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metrics-reader-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metrics-reader
+subjects:
+- kind: ServiceAccount
+  name: prometheus-k8s
+  namespace: openshift-monitoring

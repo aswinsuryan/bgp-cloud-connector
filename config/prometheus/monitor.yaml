@@ -13,14 +13,18 @@ spec:
     - path: /metrics
       port: https # Ensure this is the name of the port that exposes HTTPS metrics
       scheme: https
+      # The platform Prometheus (prometheus-k8s) presents its own service account
+      # token, which the operator's metrics FilterProvider validates via
+      # TokenReview/SubjectAccessReview against the 'metrics-reader' ClusterRole.
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
-        # TODO(user): The option insecureSkipVerify: true is not recommended for production since it disables
-        # certificate verification, exposing the system to potential man-in-the-middle attacks.
-        # For production environments, it is recommended to use cert-manager for automatic TLS certificate management.
-        # To apply this configuration, enable cert-manager and use the patch located at config/prometheus/servicemonitor_tls_patch.yaml,
-        # which securely references the certificate from the 'metrics-server-cert' secret.
-        insecureSkipVerify: true
+        # The serving certificate is minted by the OpenShift service-ca operator;
+        # verify it against the service-ca bundle that platform Prometheus mounts.
+        caFile: /etc/prometheus/configmaps/serving-certs-ca-bundle/service-ca.crt
+        serverName: openshift-cudn-bgp-routing-controller-manager-metrics-service.openshift-cudn-bgp-routing.svc
+  namespaceSelector:
+    matchNames:
+      - openshift-cudn-bgp-routing
   selector:
     matchLabels:
       control-plane: controller-manager
