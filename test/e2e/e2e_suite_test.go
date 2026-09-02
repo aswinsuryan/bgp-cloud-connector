@@ -79,18 +79,24 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	// See the note in the AWS suite: a generated profile cannot live
+	// under test/e2e/manifests, so an explicit directory wins.
+	manifestDir := os.Getenv("E2E_MANIFEST_DIR")
 	profile := os.Getenv("E2E_PROFILE")
-	Expect(profile).NotTo(BeEmpty(), "E2E_PROFILE must be set (e.g. make test-e2e my-cluster)")
-	manifestDir := filepath.Join("..", "..", "test", "e2e", "manifests", profile)
+	if manifestDir == "" {
+		Expect(profile).NotTo(BeEmpty(),
+			"set E2E_PROFILE (e.g. make test-e2e my-cluster) or E2E_MANIFEST_DIR")
+		manifestDir = filepath.Join("..", "..", "test", "e2e", "manifests", profile)
+	}
 
-	By("loading CUDNBgpConfig manifest from profile " + profile)
+	By("loading CUDNBgpConfig manifest from " + manifestDir)
 	bgpConfig = &networkingv1alpha1.CUDNBgpConfig{}
 	loadManifest(filepath.Join(manifestDir, "cudnbgpconfig.yaml"), bgpConfig)
 	Expect(bgpConfig.Spec.AWS).To(BeNil(), "shared E2E profile must not have spec.aws")
 	Expect(bgpConfig.Spec.BGP.PeerGroups).NotTo(BeEmpty(),
 		"shared E2E profile must have spec.bgp.peerGroups")
 
-	By("loading CUDNBgpRouting manifest from profile " + profile)
+	By("loading CUDNBgpRouting manifest from " + manifestDir)
 	bgpRouting = &networkingv1alpha1.CUDNBgpRouting{}
 	loadManifest(filepath.Join(manifestDir, "cudnbgprouting.yaml"), bgpRouting)
 
