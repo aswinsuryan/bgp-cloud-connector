@@ -83,7 +83,9 @@ const (
 // BGPNeighbor identifies a single BGP peer by its IP address and AS number.
 type BGPNeighbor struct {
 	// Address is the IP address of the BGP neighbor.
-	// +kubebuilder:validation:XValidation:rule="self.isIP()",message="must be a valid IP address"
+	// +kubebuilder:validation:MinLength=2
+	// +kubebuilder:validation:MaxLength=45
+	// +kubebuilder:validation:XValidation:rule="isIP(self)",message="must be a valid IP address"
 	Address string `json:"address"`
 	// RemoteASN is the autonomous system number of the BGP neighbor.
 	// +kubebuilder:validation:Minimum=0
@@ -114,6 +116,7 @@ type PeerGroup struct {
 	NodeSelector map[string]string `json:"nodeSelector"`
 	// Neighbors is the list of BGP peers that nodes in this group establish sessions with.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
 	// +listType=atomic
 	Neighbors []BGPNeighbor `json:"neighbors"`
 }
@@ -223,6 +226,7 @@ type PeerGroupStatus struct {
 	// Neighbors are the addresses the router nodes in this group peer with.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
 	Neighbors []BGPNeighbor `json:"neighbors,omitempty"`
 }
 
@@ -242,6 +246,7 @@ type BGPConfig struct {
 	// where peer groups are auto-discovered.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
 	PeerGroups []PeerGroup `json:"peerGroups,omitempty"`
 }
 
@@ -293,6 +298,7 @@ type CUDNBgpConfigStatus struct {
 	// rather than discovered.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
 	PeerGroups []PeerGroupStatus `json:"peerGroups,omitempty"`
 }
 
