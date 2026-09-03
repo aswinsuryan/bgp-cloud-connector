@@ -353,6 +353,8 @@ BUNDLE_CLEANUP_FLAGS ?= --namespace=$(BUNDLE_NAMESPACE)
 
 .PHONY: bundle-run
 bundle-run: operator-sdk ## Deploy the operator from the bundle image using operator-sdk run bundle.
+	$(KUBECTL) create namespace $(BUNDLE_NAMESPACE) --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	$(KUBECTL) label namespace $(BUNDLE_NAMESPACE) openshift.io/cluster-monitoring=true --overwrite
 	$(OPERATOR_SDK) run bundle $(BUNDLE_IMG) $(BUNDLE_RUN_FLAGS)
 
 .PHONY: bundle-clean
@@ -381,29 +383,40 @@ generate-catalog: opm ## Generate OCP version-based FBC catalog from template.
 	mkdir -p $(OCP_CATALOG_DIR)
 	$(OPM) alpha render-template basic --migrate-level bundle-object-to-csv-metadata -o yaml $(OCP_CATALOG_DIR)/catalog-template.yaml > $(OCP_CATALOG_DIR)/catalog.yaml
 
-# A comma-separated list of bundle images (e.g. make catalog-build BUNDLE_IMGS=example.com/operator-bundle:v0.1.0,example.com/operator-bundle:v0.2.0).
-# These images MUST exist in a registry and be pull-able.
+# The bundle image to include in the catalog (must exist in a registry and be pull-able).
 BUNDLE_IMGS ?= $(BUNDLE_IMG)
 
 # The image tag given to the resulting catalog image (e.g. make catalog-build CATALOG_IMG=example.com/operator-catalog:v0.2.0).
 CATALOG_IMG ?= $(IMAGE_TAG_BASE)-catalog:v$(VERSION)
 
-# Set CATALOG_BASE_IMG to an existing catalog image tag to add $BUNDLE_IMGS to that image.
-ifneq ($(origin CATALOG_BASE_IMG), undefined)
-FROM_INDEX_OPT := --from-index $(CATALOG_BASE_IMG)
-endif
+CATALOG_BUILD_DIR := catalog/dev
 
-# Build a catalog image by adding bundle images to an empty catalog using the operator package manager tool, 'opm'.
-# This recipe invokes 'opm' in 'semver' bundle add mode. For more information on add modes, see:
-# https://github.com/operator-framework/community-operators/blob/7f1438c/docs/packaging-operator.md#updating-your-existing-operator
 .PHONY: catalog-build
-catalog-build: opm ## Build a catalog image.
-	$(OPM) index add --container-tool $(CONTAINER_TOOL) --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
+catalog-build: opm ## Build an FBC catalog image from the bundle image.
+	rm -rf $(CATALOG_BUILD_DIR)
+	mkdir -p $(CATALOG_BUILD_DIR)
+	$(OPM) render $(BUNDLE_IMGS) -o yaml > $(CATALOG_BUILD_DIR)/render.yaml
+	@echo '---' >> $(CATALOG_BUILD_DIR)/render.yaml
+	@printf 'schema: olm.package\nname: bgp-cloud-connector\ndefaultChannel: alpha\n' >> $(CATALOG_BUILD_DIR)/render.yaml
+	@echo '---' >> $(CATALOG_BUILD_DIR)/render.yaml
+	@printf 'schema: olm.channel\nname: alpha\npackage: bgp-cloud-connector\nentries:\n  - name: bgp-cloud-connector.v%s\n' "$(VERSION)" >> $(CATALOG_BUILD_DIR)/render.yaml
+	$(OPM) validate $(CATALOG_BUILD_DIR)
+	$(CONTAINER_TOOL) build --build-arg CATALOG_PATH=$(CATALOG_BUILD_DIR) -f catalog.Dockerfile -t $(CATALOG_IMG) .
 
-# Push the catalog image.
 .PHONY: catalog-push
-catalog-push: ## Push a catalog image.
+catalog-push: ## Push the catalog image.
 	$(CONTAINER_TOOL) push $(CATALOG_IMG)
+
+.PHONY: catalog-deploy
+catalog-deploy: ## Deploy a CatalogSource pointing to the catalog image.
+	sed -e 's~<IMAGE>~$(CATALOG_IMG)~' ./config/samples/catalog/catalog.yaml | $(KUBECTL) apply -f -
+
+.PHONY: catalog-undeploy
+catalog-undeploy: ## Remove the dev CatalogSource.
+	$(KUBECTL) delete -f ./config/samples/catalog/catalog.yaml --ignore-not-found
+
+include .mk/sample.mk
+include .mk/shortcuts.mk
 
 # Catch-all so positional args (e.g. make test-e2e-aws my-cluster) don't error.
 %:

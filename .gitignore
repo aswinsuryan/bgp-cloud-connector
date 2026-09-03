@@ -25,6 +25,9 @@ profile.cov
 go.work
 go.work.sum
 
+# Generated catalog build artifacts
+catalog/dev/
+
 # env file
 .env
 

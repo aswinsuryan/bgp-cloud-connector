@@ -822,10 +822,7 @@ Use this workflow to test the operator as it would be installed from OperatorHub
 This requires an external image registry (e.g. `quay.io`) that the cluster can pull from, and a kubeconfig pointing at the target cluster.
 
 ```bash
-oc create ns openshift-cudn-bgp-routing
-# Let the OpenShift platform Prometheus discover the operator's ServiceMonitor.
-oc label ns openshift-cudn-bgp-routing openshift.io/cluster-monitoring=true
-make image-build image-push manifest-build manifest-push bundle-build bundle-push bundle-run \
+make images bundle-deploy \
   IMG=<registry>/<repository>/bgp-cloud-connector:v<x.y.z> \
   BUNDLE_IMG=<registry>/<repository>/bgp-cloud-connector-bundle:v<x.y.z>
 ```
