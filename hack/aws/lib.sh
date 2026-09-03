@@ -64,14 +64,41 @@ aws_cluster_facts() {
     export AWS_DEFAULT_REGION="${region}"
 }
 
-# The cluster's VPC, by the tag the installer puts on it.
+# The cluster's VPC, by way of one of its nodes.
+#
+# Asking for the VPC tagged kubernetes.io/cluster/<infra>=owned works
+# only where the installer created it. A cluster can be given a VPC
+# instead, and ROSA always is: HCP takes subnet ids for a VPC you built,
+# so nothing puts that tag on it and the lookup finds nothing at all.
+#
+# A node is in the cluster's VPC however the VPC came about, so its
+# instance is the question that has an answer on both.
 aws_cluster_vpc() {
-    local vpc
-    vpc="$(aws ec2 describe-vpcs \
-        --filters "Name=tag:kubernetes.io/cluster/${infra},Values=owned" \
-        --query 'Vpcs[0].VpcId' --output text)"
+    local provider_ids provider_id instance vpc
+
+    # Guarded the way aws_cluster_facts is, and for the same two reasons.
+    # A cluster we cannot reach is not a cluster without nodes, and
+    # reporting it as the latter sends whoever reads the log looking in
+    # the wrong place. And the callers run under errexit, so a command
+    # substitution that fails ends the script where it stands: the die
+    # below never speaks unless the failure is caught here.
+    provider_ids="$(oc get nodes -o jsonpath='{.items[*].spec.providerID}' 2>&1)" \
+        || die "could not read the nodes from the cluster" "${provider_ids}"
+    # grep exits 1 when it matches nothing, and with the pipefail the
+    # callers set that becomes the substitution's status, so under their
+    # errexit the script would end here rather than at the die below --
+    # which is the one line that says what was actually missing.
+    provider_id="$(printf '%s' "${provider_ids}" | tr ' ' '\n' | grep -m1 . || true)"
+    [[ -n "${provider_id}" ]] \
+        || die "no node reported a providerID, so the cluster's VPC cannot be found"
+
+    # aws:///us-east-1d/i-0f5cb92a122a30d19
+    instance="${provider_id##*/}"
+    vpc="$(aws ec2 describe-instances --instance-ids "${instance}" \
+        --query 'Reservations[0].Instances[0].VpcId' --output text 2>&1)" \
+        || die "cannot describe ${instance}, the instance behind a cluster node" "${vpc}"
     [[ "${vpc}" != "None" && -n "${vpc}" ]] \
-        || die "no VPC tagged kubernetes.io/cluster/${infra}=owned"
+        || die "EC2 reports no VPC for ${instance}, the instance behind a cluster node"
     printf '%s' "${vpc}"
 }
 
