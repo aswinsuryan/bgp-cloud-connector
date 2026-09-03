@@ -17,7 +17,7 @@ LABEL maintainer="Red Hat, Inc."
 LABEL com.redhat.component="bgp-cloud-connector-operator"
 LABEL name="bgpcc/bgp-cloud-connector-rhel9-operator"
 LABEL version="0.0.1"
-LABEL cpe="cpe:/a:redhat:bgp_cloud_connector:0.1::el9"
+LABEL cpe="cpe:/a:redhat:bgp_cloud_connector:1.0::el9"
 WORKDIR /
 COPY --from=builder /workspace/bin/manager /
 COPY LICENSE /licenses/
