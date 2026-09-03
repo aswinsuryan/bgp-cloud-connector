@@ -1,5 +1,5 @@
 ---
-defaultChannel: alpha
+defaultChannel: stable
 name: bgp-cloud-connector
 schema: olm.package
 ---
@@ -7,6 +7,13 @@ entries:
 - name: bgp-cloud-connector.v0.0.1
   skipRange: <0.0.1
 name: alpha
+package: bgp-cloud-connector
+schema: olm.channel
+---
+entries:
+- name: bgp-cloud-connector.v0.0.1
+  skipRange: <0.0.1
+name: stable
 package: bgp-cloud-connector
 schema: olm.channel
 ---

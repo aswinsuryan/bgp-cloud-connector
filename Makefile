@@ -4,8 +4,8 @@
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 VERSION := $(shell cat VERSION)
 
-CHANNELS ?= alpha
-DEFAULT_CHANNEL ?= alpha
+CHANNELS ?= stable
+DEFAULT_CHANNEL ?= stable
 BUNDLE_CHANNELS := --channels=$(CHANNELS)
 BUNDLE_DEFAULT_CHANNEL := --default-channel=$(DEFAULT_CHANNEL)
 BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
@@ -397,9 +397,9 @@ catalog-build: opm ## Build an FBC catalog image from the bundle image.
 	mkdir -p $(CATALOG_BUILD_DIR)
 	$(OPM) render $(BUNDLE_IMGS) -o yaml > $(CATALOG_BUILD_DIR)/render.yaml
 	@echo '---' >> $(CATALOG_BUILD_DIR)/render.yaml
-	@printf 'schema: olm.package\nname: bgp-cloud-connector\ndefaultChannel: alpha\n' >> $(CATALOG_BUILD_DIR)/render.yaml
+	@printf 'schema: olm.package\nname: bgp-cloud-connector\ndefaultChannel: %s\n' "$(DEFAULT_CHANNEL)" >> $(CATALOG_BUILD_DIR)/render.yaml
 	@echo '---' >> $(CATALOG_BUILD_DIR)/render.yaml
-	@printf 'schema: olm.channel\nname: alpha\npackage: bgp-cloud-connector\nentries:\n  - name: bgp-cloud-connector.v%s\n' "$(VERSION)" >> $(CATALOG_BUILD_DIR)/render.yaml
+	@printf 'schema: olm.channel\nname: %s\npackage: bgp-cloud-connector\nentries:\n  - name: bgp-cloud-connector.v%s\n' "$(DEFAULT_CHANNEL)" "$(VERSION)" >> $(CATALOG_BUILD_DIR)/render.yaml
 	$(OPM) validate $(CATALOG_BUILD_DIR)
 	$(CONTAINER_TOOL) build --build-arg CATALOG_PATH=$(CATALOG_BUILD_DIR) -f catalog.Dockerfile -t $(CATALOG_IMG) .
 
