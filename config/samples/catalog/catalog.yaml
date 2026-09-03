@@ -1,0 +1,15 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: bgp-cloud-connector-dev-catalog
+  namespace: openshift-marketplace
+spec:
+  sourceType: grpc
+  image: <IMAGE>
+  grpcPodConfig:
+    securityContextConfig: restricted
+  displayName: BGP Cloud Connector development catalog
+  publisher: Dev
+  updateStrategy:
+    registryPoll:
+      interval: 1m
