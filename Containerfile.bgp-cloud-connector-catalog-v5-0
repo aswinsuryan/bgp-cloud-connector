@@ -1,0 +1,22 @@
+# The base image is expected to contain
+# /bin/opm (with a serve subcommand) and /bin/grpc_health_probe
+# Note: The base image version should match the targeted OCP version
+FROM registry.redhat.io/openshift5/ose-operator-registry-rhel9:v5.0
+
+COPY LICENSE /licenses/
+
+# Configure the entrypoint and command
+ENTRYPOINT ["/bin/opm"]
+
+# Copy the FBC catalog (OCP version-based)
+COPY catalog/v5.0/catalog.yaml /configs/bgp-cloud-connector/catalog.yaml
+
+# Pre-populate serve cache
+RUN ["/bin/opm", "serve", "/configs/bgp-cloud-connector", "--cache-dir=/tmp/cache", "--cache-only"]
+
+# Set DC-specific label for the location of the DC root directory
+# in the image
+LABEL operators.operatorframework.io.index.configs.v1=/configs
+
+# Configure the command to serve the catalog
+CMD ["serve", "/configs/bgp-cloud-connector", "--cache-dir=/tmp/cache"]
