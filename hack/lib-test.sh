@@ -495,6 +495,95 @@ stub_aws_rc=0
 
 unset -f oc aws
 
+######################################################################
+echo "--- aws/lib.sh: aws_cluster_node_subnets ---"
+
+# One subnet per availability zone, for the route server endpoints.
+# Asking for subnets tagged Name=*private* only works where whoever built
+# the VPC named them that way: the terraform in rosa-bgp does, and the
+# CloudFormation ci-operator uses does not tag subnets at all, so the
+# filter matched nothing and the script stopped having done nothing.
+#
+# The fixtures are the shape of a real run: three nodes, one per zone,
+# and the instance ids and subnet ids that run actually had.
+
+stub_provider_ids=""
+stub_oc_rc=0
+stub_aws_rc=0
+
+oc() {
+    case "$*" in
+        *providerID*)
+            if (( stub_oc_rc != 0 )); then
+                echo "error: You must be logged in to the server"
+                return "${stub_oc_rc}"
+            fi
+            printf '%s' "${stub_provider_ids}" ;;
+        *) echo "unstubbed oc call: $*" >&2; return 1 ;;
+    esac
+}
+
+# Answers for the instances it was asked about and no others, so an
+# instance the function fails to pass along shows up as a missing line
+# rather than as output the stub invented.
+aws() {
+    local arg
+    case "$*" in
+        *describe-instances*)
+            if (( stub_aws_rc != 0 )); then
+                echo "An error occurred (UnauthorizedOperation) when calling DescribeInstances"
+                return "${stub_aws_rc}"
+            fi
+            for arg in "$@"; do
+                case "${arg}" in
+                    i-081c16e05f2b3f713) echo "subnet-01fa033928a5bddd4	us-west-2a" ;;
+                    i-0df8917b1589d18ac) echo "subnet-0791d165347551b4e	us-west-2b" ;;
+                    i-07df699f97fbebb5e) echo "subnet-075f0f316b10ebc1c	us-west-2c" ;;
+                    i-1|i-2)             echo "subnet-01fa033928a5bddd4	us-west-2a" ;;
+                esac
+            done ;;
+        *) echo "unstubbed aws call: $*" >&2; return 1 ;;
+    esac
+}
+
+stub_provider_ids="aws:///us-west-2a/i-081c16e05f2b3f713 aws:///us-west-2b/i-0df8917b1589d18ac aws:///us-west-2c/i-07df699f97fbebb5e"
+
+check "returns a subnet and zone per node" \
+    "$(aws_cluster_node_subnets | wc -l)" "3"
+check "returns the zone alongside the subnet" \
+    "$(aws_cluster_node_subnets | awk '$2=="us-west-2b"{print $1}')" "subnet-0791d165347551b4e"
+
+# Several nodes in one zone is the ordinary case, and the caller takes
+# one subnet per zone; this only has to report what it found.
+stub_provider_ids="aws:///us-west-2a/i-1 aws:///us-west-2a/i-2"
+check "reports a repeated zone rather than collapsing it" \
+    "$(aws_cluster_node_subnets | wc -l)" "2"
+
+# The failures, under the options the callers set rather than this
+# harness's, because errexit is what decides whether die is reached.
+stub_provider_ids=""
+out="$( ( set -o errexit; set -o pipefail; aws_cluster_node_subnets ) 2>&1 )"
+check "fails when no node reports a providerID" "$?" "1"
+check "names the missing providerID" \
+    "$(printf '%s' "${out}" | grep -c 'no node reported a providerID')" "1"
+
+stub_provider_ids="aws:///us-west-2a/i-081c16e05f2b3f713"
+stub_oc_rc=1
+out="$( ( set -o errexit; set -o pipefail; aws_cluster_node_subnets ) 2>&1 )"
+check "fails when the cluster cannot be read" "$?" "1"
+check "repeats what oc said" \
+    "$(printf '%s' "${out}" | grep -c 'must be logged in')" "1"
+stub_oc_rc=0
+
+stub_aws_rc=1
+out="$( ( set -o errexit; set -o pipefail; aws_cluster_node_subnets ) 2>&1 )"
+check "fails when EC2 refuses the request" "$?" "1"
+check "repeats what aws said" \
+    "$(printf '%s' "${out}" | grep -c 'UnauthorizedOperation')" "1"
+stub_aws_rc=0
+
+unset -f oc aws
+
 echo "---"
 echo "passed=${passed} failed=${failed}"
 [[ "${failed}" -eq 0 ]]
