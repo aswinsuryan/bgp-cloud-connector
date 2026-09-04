@@ -102,6 +102,44 @@ aws_cluster_vpc() {
     printf '%s' "${vpc}"
 }
 
+# A subnet and its availability zone for every node, one line each.
+#
+# Asking EC2 for the subnets tagged Name=*private* works only where
+# whoever built the VPC named them that way. The terraform in rosa-bgp
+# does; the CloudFormation ci-operator provisions with does not tag
+# subnets at all, so the filter matched nothing and create-route-servers
+# stopped having done nothing, on a VPC that had a private subnet in
+# every zone.
+#
+# A node is in the subnet its router runs in, which is where an endpoint
+# belongs, and that is true of a VPC however it was built and whatever it
+# named things. Zones repeat when zones have several nodes; the caller
+# takes one subnet per zone.
+aws_cluster_node_subnets() {
+    local provider_ids out
+    local -a instances=()
+
+    provider_ids="$(oc get nodes -o jsonpath='{.items[*].spec.providerID}' 2>&1)" \
+        || die "could not read the nodes from the cluster" "${provider_ids}"
+
+    # aws:///us-west-2a/i-081c16e05f2b3f713
+    local id
+    while read -r id; do
+        [[ -n "${id}" ]] && instances+=("${id##*/}")
+    done < <(printf '%s\n' "${provider_ids}" | tr ' ' '\n')
+
+    (( ${#instances[@]} > 0 )) \
+        || die "no node reported a providerID, so the cluster's subnets cannot be found"
+
+    out="$(aws ec2 describe-instances --instance-ids "${instances[@]}" \
+        --query 'Reservations[].Instances[].[SubnetId,Placement.AvailabilityZone]' \
+        --output text 2>&1)" \
+        || die "cannot describe the instances behind the cluster's nodes" "${out}"
+    # Terminated, so that a caller reading this with `while read` sees the
+    # last line rather than assigning it and leaving the loop.
+    printf '%s\n' "${out}"
+}
+
 # Ask before creating anything. An API the region does not offer and an
 # API this account may not call are different answers, and a failed
 # create cannot tell them apart. The error text is the distinction.

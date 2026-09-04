@@ -104,18 +104,15 @@ if [[ -n "${clash}" ]]; then
     warn "and it must differ from localASN in your CUDNBgpConfig."
 fi
 
-# One endpoint per AZ, so take the first private subnet in each.
+# One endpoint per AZ, so take the first subnet in each.
 #
-# Read before the loop rather than piped into it. At the head of a
-# pipeline the describe's exit status is the sort's, and a call that
-# failed then arrives as no output, which the check below reports as
-# "no private subnets" -- sending you to look at the VPC rather than at
-# the API call that did not answer.
-subnets_raw="$(aws_query "list private subnets in ${vpc}" \
-    aws ec2 describe-subnets \
-    --filters "Name=vpc-id,Values=${vpc}" "Name=tag:Name,Values=*private*" \
-    --query 'Subnets[].[SubnetId,AvailabilityZone]' --output text)" \
-    || die "cannot list the subnets in ${vpc}"
+# One per availability zone, taken from the nodes rather than from a
+# subnet named "private". The name is a convention of whoever built the
+# VPC -- the rosa-bgp terraform follows it, the CloudFormation
+# ci-operator provisions with does not tag subnets at all -- whereas a
+# node is in the subnet its router runs in on any of them, which is
+# where the endpoint belongs anyway.
+subnets_raw="$(aws_cluster_node_subnets)"
 
 subnets=()
 seen_azs=""
@@ -126,9 +123,19 @@ while read -r subnet az; do
     subnets+=("${subnet}:${az}")
 done < <(sort -k2 <<<"${subnets_raw}")
 
-(( ${#subnets[@]} > 0 )) || die "no private subnets found in ${vpc}"
+if (( ${#subnets[@]} == 0 )); then
+    # What the VPC actually holds, because "none found" on its own sends
+    # you to the console to find out what this could have printed.
+    warn "the cluster's nodes are in no subnet this could read; ${vpc} holds:"
+    # The backticks are JMESPath's, not the shell's.
+    # shellcheck disable=SC2016
+    aws ec2 describe-subnets --filters "Name=vpc-id,Values=${vpc}" \
+        --query 'Subnets[].[SubnetId,AvailabilityZone,Tags[?Key==`Name`].Value|[0]]' \
+        --output text >&2 || true
+    die "no subnet found for any node in ${vpc}"
+fi
 
-info "private subnets, one per AZ:"
+info "subnets, one per AZ:"
 for entry in "${subnets[@]}"; do
     info "  ${entry#*:}  ${entry%%:*}"
 done
