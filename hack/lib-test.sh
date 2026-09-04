@@ -402,6 +402,99 @@ check "a call accepted first time succeeds" "${rc}" "0"
 check "a call accepted first time returns its output" "${out}" "fine"
 check "a call accepted first time did not sleep" "$(( elapsed <= 2 ))" "1"
 
+######################################################################
+echo "--- aws/lib.sh: aws_cluster_vpc ---"
+
+# The VPC has to be found on a cluster whose VPC the installer did not
+# create. ROSA HCP takes a BYO VPC, so nothing tags it
+# kubernetes.io/cluster/<infra>=owned, and a lookup that depends on that
+# tag finds nothing. A node is in the cluster's VPC whoever built it, so
+# that is what these fixtures describe.
+
+stub_provider_id=""
+stub_instance_vpc=""
+stub_oc_rc=0
+stub_aws_rc=0
+
+oc() {
+    case "$*" in
+        *providerID*)
+            if (( stub_oc_rc != 0 )); then
+                echo "error: You must be logged in to the server"
+                return "${stub_oc_rc}"
+            fi
+            printf '%s' "${stub_provider_id}" ;;
+        *) echo "unstubbed oc call: $*" >&2; return 1 ;;
+    esac
+}
+
+aws() {
+    case "$*" in
+        *describe-instances*)
+            if (( stub_aws_rc != 0 )); then
+                echo "An error occurred (UnauthorizedOperation) when calling DescribeInstances"
+                return "${stub_aws_rc}"
+            fi
+            # Only ever asked about the instance the node named.
+            case "$*" in
+                *"${stub_provider_id##*/}"*) printf '%s' "${stub_instance_vpc}" ;;
+                *) printf 'None' ;;
+            esac
+            ;;
+        *) echo "unstubbed aws call: $*" >&2; return 1 ;;
+    esac
+}
+
+stub_provider_id="aws:///us-east-1d/i-0f5cb92a122a30d19"
+stub_instance_vpc="vpc-0badc0ffee"
+check "finds the VPC from a node's instance" \
+    "$(aws_cluster_vpc)" "vpc-0badc0ffee"
+
+# A cluster whose nodes have gone, or an instance EC2 no longer knows
+# about, must fail loudly rather than return the empty string that every
+# caller would then paste into a filter.
+stub_instance_vpc="None"
+(aws_cluster_vpc) >/dev/null 2>&1
+check "fails when the instance has no VPC" "$?" "1"
+
+stub_provider_id=""
+(aws_cluster_vpc) >/dev/null 2>&1
+check "fails when no node reports a providerID" "$?" "1"
+
+# The callers set errexit as well as pipefail, and under both a pipeline
+# whose grep matches nothing ends the script before die can name what was
+# missing. The exit status is 1 either way, so only the message tells the
+# two apart. This harness sets pipefail but not errexit, which is why
+# these run in a subshell that sets what the callers set -- without it
+# the check above passes over a diagnostic nobody will ever see.
+out="$( ( set -o errexit; set -o pipefail; aws_cluster_vpc ) 2>&1 )"
+check "names the missing providerID under the callers' options" \
+    "$(printf '%s' "${out}" | grep -c 'no node reported a providerID')" "1"
+
+# A cluster we cannot read is not a cluster without nodes, and saying so
+# sends whoever reads the log looking in the wrong place. The callers run
+# under errexit, so a command substitution that fails takes the script
+# down before die can speak unless the failure is caught here.
+stub_provider_id="aws:///us-east-1d/i-0f5cb92a122a30d19"
+stub_instance_vpc="vpc-0badc0ffee"
+stub_oc_rc=1
+out="$( (aws_cluster_vpc) 2>&1 )"
+check "fails when the cluster cannot be read" "$?" "1"
+check "says the cluster could not be read" \
+    "$(printf '%s' "${out}" | grep -c 'could not read the nodes')" "1"
+check "repeats what oc said" \
+    "$(printf '%s' "${out}" | grep -c 'must be logged in')" "1"
+stub_oc_rc=0
+
+stub_aws_rc=1
+out="$( (aws_cluster_vpc) 2>&1 )"
+check "fails when EC2 refuses the request" "$?" "1"
+check "repeats what aws said" \
+    "$(printf '%s' "${out}" | grep -c 'UnauthorizedOperation')" "1"
+stub_aws_rc=0
+
+unset -f oc aws
+
 echo "---"
 echo "passed=${passed} failed=${failed}"
 [[ "${failed}" -eq 0 ]]
