@@ -47,7 +47,7 @@ import (
 // +kubebuilder:rbac:groups=networking.openshift.io,resources=bgproutings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.openshift.io,resources=bgproutings/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=nodes;pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=k8s.ovn.org,resources=clusteruserdefinednetworks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=k8s.ovn.org,resources=routeadvertisements,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
@@ -283,31 +283,14 @@ func (r *BGPRoutingReconciler) setDegraded(
 }
 
 // SetupWithManager conditionally watches VMIs when KubeVirt is already
-// installed. The virt-launcher Pod watch provides lifecycle events when the
-// optional KubeVirt API is unavailable at operator startup.
+// installed. If KubeVirt is installed later, the periodic reconcile discovers
+// its VMIs; registering a Pod fallback would cache every Pod cluster-wide.
 func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	cudn := &unstructured.Unstructured{}
 	cudn.SetGroupVersionKind(ClusterUDNGVK)
 
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&networkingapi.BGPRouting{}).
-		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(
-			r.mapWorkloadToRouting,
-		), builder.WithPredicates(predicate.Funcs{
-			CreateFunc: func(e event.CreateEvent) bool { return isVirtLauncher(e.Object) },
-			DeleteFunc: func(e event.DeleteEvent) bool { return isVirtLauncher(e.Object) },
-			UpdateFunc: func(e event.UpdateEvent) bool {
-				oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
-				newPod, newOK := e.ObjectNew.(*corev1.Pod)
-				if !oldOK || !newOK || (!isVirtLauncher(oldPod) && !isVirtLauncher(newPod)) {
-					return false
-				}
-				return oldPod.Spec.NodeName != newPod.Spec.NodeName ||
-					oldPod.Status.Phase != newPod.Status.Phase ||
-					oldPod.DeletionTimestamp.IsZero() != newPod.DeletionTimestamp.IsZero()
-			},
-			GenericFunc: func(event.GenericEvent) bool { return false },
-		})).
 		Watches(cudn, handler.EnqueueRequestsFromMapFunc(
 			r.mapClusterUDNToRouting,
 		)).
@@ -342,10 +325,6 @@ func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return controllerBuilder.Named("bgprouting").Complete(r)
-}
-
-func isVirtLauncher(obj client.Object) bool {
-	return obj.GetLabels()["kubevirt.io"] == "virt-launcher"
 }
 
 func (r *BGPRoutingReconciler) mapWorkloadToRouting(ctx context.Context, obj client.Object) []reconcile.Request {

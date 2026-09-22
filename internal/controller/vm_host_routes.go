@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -39,6 +40,8 @@ import (
 
 type vmHostRoutesByNode map[string][]string
 
+var errVMIAPIUnavailable = errors.New("VirtualMachineInstance API is unavailable")
+
 // VMHostRouteStatus is what one pass of EnsureVMHostRoutes achieved. Pending
 // and Unserved are independent: routes can be written for some VMs while
 // others wait for an address and others cannot be given a route at all.
@@ -57,6 +60,19 @@ type VMHostRouteStatus struct {
 func EnsureVMHostRoutes(ctx context.Context, c client.Client, routing *networkingapi.BGPRouting, config *networkingapi.BGPCloudConfiguration) (VMHostRouteStatus, error) {
 	routes, nodes, pending, err := discoverVMHostRoutes(ctx, c, routing)
 	if err != nil {
+		if errors.Is(err, errVMIAPIUnavailable) {
+			hasExisting, listErr := hasVMHostRouteConfigurations(ctx, c, routing.Name)
+			if listErr != nil {
+				return VMHostRouteStatus{}, listErr
+			}
+			// The optional KubeVirt API being absent is the normal case on a
+			// cluster that has never advertised a VM route. If routes already
+			// exist, however, treating a discovery failure as an empty VMI list
+			// would withdraw them all. Abort this pass and preserve them instead.
+			if !hasExisting {
+				return VMHostRouteStatus{}, nil
+			}
+		}
 		return VMHostRouteStatus{}, err
 	}
 
@@ -126,7 +142,7 @@ func discoverVMHostRoutes(ctx context.Context, c client.Client, routing *network
 		list.SetGroupVersionKind(VirtualMachineInstanceGVK.GroupVersion().WithKind("VirtualMachineInstanceList"))
 		if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
 			if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) || runtime.IsNotRegisteredError(err) {
-				return vmHostRoutesByNode{}, map[string]corev1.Node{}, false, nil
+				return nil, nil, false, fmt.Errorf("%w: %w", errVMIAPIUnavailable, err)
 			}
 			return nil, nil, false, err
 		}
@@ -175,25 +191,25 @@ func discoverVMHostRoutes(ctx context.Context, c client.Client, routing *network
 			nodes[nodeName] = *node
 		}
 
-		matchedNetworks := make([]bool, len(prefixes))
+		matchedNetwork := false
 		for _, address := range vmiAddresses(vmi) {
 			ip, err := netip.ParseAddr(address)
 			if err != nil {
 				continue
 			}
-			for j, network := range prefixes {
+			for _, network := range prefixes {
 				if network.Contains(ip) {
 					routes[nodeName] = append(routes[nodeName], netip.PrefixFrom(ip, ip.BitLen()).String())
-					matchedNetworks[j] = true
+					matchedNetwork = true
 					break
 				}
 			}
 		}
-		for _, matched := range matchedNetworks {
-			if !matched {
-				pending = true
-				break
-			}
+		// A VMI need not have an address in every subnet of a dual-stack
+		// network. It is ready for this controller once any address belongs to
+		// the routed network; advertise every such address that is present.
+		if !matchedNetwork {
+			pending = true
 		}
 	}
 	for nodeName := range routes {
@@ -408,6 +424,20 @@ func pruneVMHostRouteConfigurations(ctx context.Context, c client.Client, routin
 		}
 	}
 	return nil
+}
+
+func hasVMHostRouteConfigurations(ctx context.Context, c client.Client, routingName string) (bool, error) {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"))
+	if err := c.List(ctx, list, client.InNamespace(FRRNamespace), client.MatchingLabels{LabelManagedBy: LabelManagedByVMHostRoutes}); err != nil {
+		return false, err
+	}
+	for i := range list.Items {
+		if list.Items[i].GetAnnotations()[AnnotationBGPRouting] == routingName {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func DeleteVMHostRoutes(ctx context.Context, c client.Client, routingName string) error {

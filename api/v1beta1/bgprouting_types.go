@@ -68,6 +68,7 @@ type BGPRoutingStatus struct {
 // +kubebuilder:resource:scope=Cluster,shortName=bgpr,categories=networking
 // +kubebuilder:printcolumn:name="Network",type="string",JSONPath=".spec.network.name"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="VM Routes",type="string",JSONPath=".status.conditions[?(@.type=='VMHostRoutesConfigured')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +operator-sdk:csv:customresourcedefinitions:displayName="BGP Routing"
 

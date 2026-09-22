@@ -40,12 +40,14 @@ func TestClientOptions_DoesNotCacheSecrets(t *testing.T) {
 	t.Errorf("secrets are still cached: DisableFor is %v", cacheOpts.DisableFor)
 }
 
-// Nothing else should be taken out of the cache by accident. Nodes, pods
-// and the downstream custom resources are read on every reconcile and
-// are granted cluster-wide; serving those from the API server instead
-// would turn each reconcile into a burst of live reads.
-func TestClientOptions_CachesEverythingElse(t *testing.T) {
-	if got := len(ClientOptions().Cache.DisableFor); got != 1 {
-		t.Errorf("%d types bypass the cache, want only secrets", got)
+// The operator only needs a small labelled set of FRR Pods. Reading it live
+// avoids retaining every Pod in the cluster just to serve that list.
+func TestClientOptions_DoesNotCachePods(t *testing.T) {
+	cacheOpts := ClientOptions().Cache
+	for _, obj := range cacheOpts.DisableFor {
+		if _, ok := obj.(*corev1.Pod); ok {
+			return
+		}
 	}
+	t.Errorf("pods are still cached: DisableFor is %v", cacheOpts.DisableFor)
 }

@@ -24,6 +24,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,6 +32,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	networkingapi "github.com/openshift/bgp-cloud-connector/api/v1beta1"
 )
@@ -132,6 +134,88 @@ func TestEnsureVMHostRoutesAggregatesDualStackRoutesPerNode(t *testing.T) {
 	hostname, _, _ := unstructured.NestedString(got.Object, "spec", "nodeSelector", "matchLabels", corev1.LabelHostname)
 	if hostname != node.Name {
 		t.Fatalf("hostname selector = %q, want %q", hostname, node.Name)
+	}
+}
+
+func TestEnsureVMHostRoutesDoesNotWaitForEveryAddressFamily(t *testing.T) {
+	ctx := context.Background()
+	routing := newTestBGPRouting()
+	routing.Spec.Network.Subnets = []string{"10.100.0.0/16", "fd00:100::/64"}
+	config := newReadyBGPCloudConfiguration()
+	config.Spec.BGP.PeerGroups[0].NodeSelector = nil
+	node := testRouterNode("worker-a", "a")
+	c := fake.NewClientBuilder().WithScheme(vmHostRouteTestScheme()).WithObjects(
+		testVMNamespace(), node, testVMI("vms", "ipv4-only", node.Name, "10.100.0.4"),
+	).Build()
+
+	status, err := EnsureVMHostRoutes(ctx, c, routing, config)
+	if err != nil {
+		t.Fatalf("EnsureVMHostRoutes: %v", err)
+	}
+	if status.Configured != 1 || status.Pending {
+		t.Fatalf("Configured = %d, Pending = %t; want 1, false", status.Configured, status.Pending)
+	}
+}
+
+func TestEnsureVMHostRoutesPreservesRoutesWhenVMIAPIBecomesUnavailable(t *testing.T) {
+	ctx := context.Background()
+	routing := newTestBGPRouting()
+	stale := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "existing-route", "namespace": FRRNamespace,
+			"labels":      map[string]interface{}{LabelManagedBy: LabelManagedByVMHostRoutes},
+			"annotations": map[string]interface{}{AnnotationBGPRouting: routing.Name},
+		},
+	}}
+	noMatch := &apimeta.NoKindMatchError{
+		GroupKind:        VirtualMachineInstanceGVK.GroupKind(),
+		SearchedVersions: []string{VirtualMachineInstanceGVK.Version},
+	}
+	c := fake.NewClientBuilder().WithScheme(vmHostRouteTestScheme()).WithObjects(
+		testVMNamespace(), stale,
+	).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if list.GetObjectKind().GroupVersionKind() == VirtualMachineInstanceGVK.GroupVersion().WithKind("VirtualMachineInstanceList") {
+				return noMatch
+			}
+			return cl.List(ctx, list, opts...)
+		},
+	}).Build()
+
+	if _, err := EnsureVMHostRoutes(ctx, c, routing, newReadyBGPCloudConfiguration()); !apimeta.IsNoMatchError(err) {
+		t.Fatalf("EnsureVMHostRoutes error = %v, want NoMatch", err)
+	}
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(stale), got); err != nil {
+		t.Fatalf("existing route was removed after transient VMI API failure: %v", err)
+	}
+}
+
+func TestEnsureVMHostRoutesAllowsKubeVirtToBeAbsent(t *testing.T) {
+	routing := newTestBGPRouting()
+	noMatch := &apimeta.NoKindMatchError{
+		GroupKind:        VirtualMachineInstanceGVK.GroupKind(),
+		SearchedVersions: []string{VirtualMachineInstanceGVK.Version},
+	}
+	c := fake.NewClientBuilder().WithScheme(vmHostRouteTestScheme()).WithObjects(
+		testVMNamespace(),
+	).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if list.GetObjectKind().GroupVersionKind() == VirtualMachineInstanceGVK.GroupVersion().WithKind("VirtualMachineInstanceList") {
+				return noMatch
+			}
+			return cl.List(ctx, list, opts...)
+		},
+	}).Build()
+
+	status, err := EnsureVMHostRoutes(context.Background(), c, routing, newReadyBGPCloudConfiguration())
+	if err != nil {
+		t.Fatalf("EnsureVMHostRoutes without KubeVirt: %v", err)
+	}
+	if status.Configured != 0 || status.Pending || len(status.Unserved) != 0 {
+		t.Fatalf("status without KubeVirt = %#v, want empty success", status)
 	}
 }
 
