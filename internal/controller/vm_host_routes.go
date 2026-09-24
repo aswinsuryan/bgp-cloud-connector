@@ -65,10 +65,8 @@ func EnsureVMHostRoutes(ctx context.Context, c client.Client, routing *networkin
 			if listErr != nil {
 				return VMHostRouteStatus{}, listErr
 			}
-			// The optional KubeVirt API being absent is the normal case on a
-			// cluster that has never advertised a VM route. If routes already
-			// exist, however, treating a discovery failure as an empty VMI list
-			// would withdraw them all. Abort this pass and preserve them instead.
+			// An unavailable optional VMI API means "unknown," not "no VMIs."
+			// Preserve existing routes; without any, there is nothing to withdraw.
 			if !hasExisting {
 				return VMHostRouteStatus{}, nil
 			}
@@ -382,11 +380,9 @@ func ensureVMHostRouteConfiguration(ctx context.Context, c client.Client, routin
 			"bgp":          bgp,
 		},
 	}}
-	// BGPRouting is cluster-scoped, so it is a legal owner for a namespaced
-	// dependent and the collector reaps these when it goes. Removing the
-	// BGPRouting finalizer by hand is otherwise enough to strand them, and
-	// frr-k8s emits "no bgp network import-check", so a stranded object goes on
-	// originating its prefixes with nothing in the RIB to contradict it.
+	// The owner reference lets garbage collection remove the namespaced route
+	// even if BGPRouting deletion bypasses its finalizer. This prevents an
+	// orphaned FRRConfiguration from continuing to originate stale prefixes.
 	if err := controllerutil.SetControllerReference(routing, obj, c.Scheme()); err != nil {
 		return fmt.Errorf("setting owner reference on %s: %w", name, err)
 	}

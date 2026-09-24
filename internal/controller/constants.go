@@ -74,6 +74,7 @@ const (
 	ReasonCUDNFailed           = "CUDNFailed"
 	ReasonRAFailed             = "RAFailed"
 	ReasonVMHostRoutesFailed   = "VMHostRoutesFailed"
+	ReasonVMIAPIUnavailable    = "VMIAPIUnavailable"
 	// Reported when some VMs cannot be given a host route as the cluster
 	// stands. The network itself is configured, so this is not a failure.
 	ReasonVMHostRoutesIncomplete = "VMHostRoutesIncomplete"

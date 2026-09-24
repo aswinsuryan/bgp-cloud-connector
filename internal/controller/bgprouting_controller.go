@@ -48,6 +48,7 @@ import (
 // +kubebuilder:rbac:groups=networking.openshift.io,resources=bgproutings/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=k8s.ovn.org,resources=clusteruserdefinednetworks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=k8s.ovn.org,resources=routeadvertisements,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch
@@ -81,6 +82,24 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	routing.Status.Phase = networkingapi.PhaseConfiguring
 	routing.Status.ObservedGeneration = routing.Generation
 
+	// Namespace selection is authoritative for route ownership. When no selected
+	// namespace remains, withdraw all routes even if other prerequisites are not
+	// ready. Preserve routes when the namespace API result is inconclusive.
+	namespaceErr := ValidateNamespaceLabels(ctx, r.Client, routing.Spec.Network.Name)
+	noMatchingNamespaces := errors.Is(namespaceErr, errNoMatchingNamespaces)
+	if noMatchingNamespaces {
+		if err := DeleteVMHostRoutes(ctx, r.Client, routing.Name); err != nil {
+			return ctrl.Result{}, fmt.Errorf("removing VM host routes after the last matching namespace disappeared: %w", err)
+		}
+		meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
+			Type:               networkingapi.ConditionVMHostRoutesConfigured,
+			Status:             metav1.ConditionTrue,
+			Reason:             ReasonReconciled,
+			Message:            "Configured 0 VM host routes",
+			ObservedGeneration: routing.Generation,
+		})
+	}
+
 	// Pre-check: spec.network.name must be unique across all BGPRouting CRs
 	routingList := &networkingapi.BGPRoutingList{}
 	if err := r.List(ctx, routingList); err != nil {
@@ -89,10 +108,25 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	for i := range routingList.Items {
 		other := &routingList.Items[i]
 		if other.Name != routing.Name && other.Spec.Network.Name == routing.Spec.Network.Name {
+			if err := DeleteVMHostRoutes(ctx, r.Client, routing.Name); err != nil {
+				return ctrl.Result{}, fmt.Errorf("removing VM host routes after detecting duplicate network %q: %w",
+					routing.Spec.Network.Name, err)
+			}
+			meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
+				Type:               networkingapi.ConditionVMHostRoutesConfigured,
+				Status:             metav1.ConditionTrue,
+				Reason:             ReasonReconciled,
+				Message:            "Configured 0 VM host routes",
+				ObservedGeneration: routing.Generation,
+			})
 			return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
 				ReasonDuplicateNetwork,
 				fmt.Sprintf("spec.network.name %q already claimed by BGPRouting %q", routing.Spec.Network.Name, other.Name))
 		}
+	}
+	if noMatchingNamespaces {
+		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
+			ReasonNamespaceNotReady, fmt.Sprintf("namespace validation failed: %v", namespaceErr))
 	}
 
 	// Pre-check: BGPCloudConfiguration must exist and be Ready
@@ -120,9 +154,9 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Phase 1: Validate namespace labels + ensure ClusterUDN
 	log.Info("Phase 1: validating namespace and ensuring ClusterUDN", "network", routing.Spec.Network.Name)
-	if err := ValidateNamespaceLabels(ctx, r.Client, routing.Spec.Network.Name); err != nil {
+	if namespaceErr != nil {
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionNetworkCreated,
-			ReasonNamespaceNotReady, fmt.Sprintf("namespace validation failed: %v", err))
+			ReasonNamespaceNotReady, fmt.Sprintf("namespace validation failed: %v", namespaceErr))
 	}
 	if err := EnsureClusterUDN(ctx, r.Client, routing); err != nil {
 		var validationErr *CUDNValidationError
@@ -159,6 +193,21 @@ func (r *BGPRoutingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	log.Info("Phase 3: ensuring VM host routes")
 	hostRoutes, err := EnsureVMHostRoutes(ctx, r.Client, routing, bgpConfig)
 	if err != nil {
+		if errors.Is(err, errVMIAPIUnavailable) {
+			meta.SetStatusCondition(&routing.Status.Conditions, metav1.Condition{
+				Type:               networkingapi.ConditionVMHostRoutesConfigured,
+				Status:             metav1.ConditionFalse,
+				Reason:             ReasonVMIAPIUnavailable,
+				Message:            "VirtualMachineInstance API is unavailable; existing VM routes are preserved. Restore KubeVirt or remove stale VM host-route FRRConfigurations after confirming the VMs are gone",
+				ObservedGeneration: routing.Generation,
+			})
+			if patchErr := r.patchRoutingStatus(ctx, routing, *baselineStatus, func(rt *networkingapi.BGPRouting) {
+				rt.Status.Phase = networkingapi.PhaseReady
+			}); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
 		return r.setDegraded(ctx, routing, *baselineStatus, networkingapi.ConditionVMHostRoutesConfigured,
 			ReasonVMHostRoutesFailed, fmt.Sprintf("failed to ensure VM host routes: %v", err))
 	}
@@ -282,9 +331,9 @@ func (r *BGPRoutingReconciler) setDegraded(
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
-// SetupWithManager conditionally watches VMIs when KubeVirt is already
-// installed. If KubeVirt is installed later, the periodic reconcile discovers
-// its VMIs; registering a Pod fallback would cache every Pod cluster-wide.
+// SetupWithManager watches VMIs when their API is available during startup.
+// Otherwise, virt-launcher Pod events trigger the same reconciliation.
+// CacheOptions limits that Pod informer at the API server.
 func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	cudn := &unstructured.Unstructured{}
 	cudn.SetGroupVersionKind(ClusterUDNGVK)
@@ -297,6 +346,9 @@ func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(
 			r.enqueueAllRoutings,
 		), builder.WithPredicates(nodeLabelChangePredicate())).
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(
+			r.mapNamespaceToRouting,
+		), builder.WithPredicates(namespaceLabelChangePredicate())).
 		Watches(&networkingapi.BGPCloudConfiguration{}, handler.EnqueueRequestsFromMapFunc(
 			r.enqueueAllRoutings,
 		), builder.WithPredicates(configRelevantToRoutingPredicate())).
@@ -316,15 +368,29 @@ func (r *BGPRoutingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			GenericFunc: func(event.GenericEvent) bool { return false },
 		}))
 
-	if _, err := mgr.GetRESTMapper().RESTMapping(VirtualMachineInstanceGVK.GroupKind(), VirtualMachineInstanceGVK.Version); err == nil {
-		vmi := &unstructured.Unstructured{}
-		vmi.SetGroupVersionKind(VirtualMachineInstanceGVK)
-		controllerBuilder = controllerBuilder.Watches(vmi, handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToRouting))
-	} else if !meta.IsNoMatchError(err) {
-		return fmt.Errorf("discovering VirtualMachineInstance API: %w", err)
+	workload, err := workloadWatchObject(mgr.GetRESTMapper())
+	if err != nil {
+		return err
+	}
+	if _, isPod := workload.(*corev1.Pod); isPod {
+		controllerBuilder = controllerBuilder.Watches(workload, handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToRouting))
+	} else {
+		controllerBuilder = controllerBuilder.Watches(workload, handler.EnqueueRequestsFromMapFunc(r.mapWorkloadToRouting),
+			builder.WithPredicates(vmiRouteChangePredicate()))
 	}
 
 	return controllerBuilder.Named("bgprouting").Complete(r)
+}
+
+func workloadWatchObject(mapper meta.RESTMapper) (client.Object, error) {
+	if _, err := mapper.RESTMapping(VirtualMachineInstanceGVK.GroupKind(), VirtualMachineInstanceGVK.Version); err == nil {
+		vmi := &unstructured.Unstructured{}
+		vmi.SetGroupVersionKind(VirtualMachineInstanceGVK)
+		return vmi, nil
+	} else if !meta.IsNoMatchError(err) {
+		return nil, fmt.Errorf("discovering VirtualMachineInstance API: %w", err)
+	}
+	return &corev1.Pod{}, nil
 }
 
 func (r *BGPRoutingReconciler) mapWorkloadToRouting(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -332,15 +398,21 @@ func (r *BGPRoutingReconciler) mapWorkloadToRouting(ctx context.Context, obj cli
 	if err := r.Get(ctx, types.NamespacedName{Name: obj.GetNamespace()}, namespace); err != nil {
 		return nil
 	}
-	networkName := namespace.Labels[LabelClusterUDN]
-	primaryNetwork, hasPrimaryNetwork := namespace.Labels[LabelPrimaryUDN]
+	return r.mapNamespaceToRouting(ctx, namespace)
+}
+
+// The event object's labels identify the network affected by a namespace
+// deletion or either side of a namespace label change.
+func (r *BGPRoutingReconciler) mapNamespaceToRouting(ctx context.Context, obj client.Object) []reconcile.Request {
+	networkName := obj.GetLabels()[LabelClusterUDN]
+	primaryNetwork, hasPrimaryNetwork := obj.GetLabels()[LabelPrimaryUDN]
 	if networkName == "" || !hasPrimaryNetwork || primaryNetwork != "" {
 		return nil
 	}
 
 	routingList := &networkingapi.BGPRoutingList{}
 	if err := r.List(ctx, routingList); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to list BGPRouting for workload event")
+		logf.FromContext(ctx).Error(err, "failed to list BGPRouting for namespace or workload event")
 		return nil
 	}
 	requests := make([]reconcile.Request, 0, 1)
@@ -350,6 +422,23 @@ func (r *BGPRoutingReconciler) mapWorkloadToRouting(ctx context.Context, obj cli
 		}
 	}
 	return requests
+}
+
+func namespaceLabelChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldNamespace, ok1 := e.ObjectOld.(*corev1.Namespace)
+			newNamespace, ok2 := e.ObjectNew.(*corev1.Namespace)
+			if !ok1 || !ok2 {
+				return true
+			}
+			oldPrimary, oldHasPrimary := oldNamespace.Labels[LabelPrimaryUDN]
+			newPrimary, newHasPrimary := newNamespace.Labels[LabelPrimaryUDN]
+			return oldNamespace.Labels[LabelClusterUDN] != newNamespace.Labels[LabelClusterUDN] ||
+				oldPrimary != newPrimary || oldHasPrimary != newHasPrimary
+		},
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
 }
 
 // enqueueAllRoutings enqueues every BGPRouting so that a DuplicateNetwork
@@ -397,6 +486,32 @@ func nodeLabelChangePredicate() predicate.Predicate {
 				return true
 			}
 			return !reflect.DeepEqual(oldNode.Labels, newNode.Labels)
+		},
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
+}
+
+// vmiRouteChangePredicate passes changes that can alter a host route: deletion,
+// phase, hosting node, or guest interfaces.
+func vmiRouteChangePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldVMI, ok1 := e.ObjectOld.(*unstructured.Unstructured)
+			newVMI, ok2 := e.ObjectNew.(*unstructured.Unstructured)
+			if !ok1 || !ok2 {
+				return true
+			}
+			if !reflect.DeepEqual(oldVMI.GetDeletionTimestamp(), newVMI.GetDeletionTimestamp()) {
+				return true
+			}
+			for _, field := range []string{"phase", "nodeName", "interfaces"} {
+				oldValue, _, _ := unstructured.NestedFieldNoCopy(oldVMI.Object, "status", field)
+				newValue, _, _ := unstructured.NestedFieldNoCopy(newVMI.Object, "status", field)
+				if !reflect.DeepEqual(oldValue, newValue) {
+					return true
+				}
+			}
+			return false
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
