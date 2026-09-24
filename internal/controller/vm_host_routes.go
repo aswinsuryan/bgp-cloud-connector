@@ -344,22 +344,12 @@ func ensureVMHostRouteConfiguration(ctx context.Context, c client.Client, routin
 		if len(allowedPrefixes) == 0 {
 			continue
 		}
-		neighbor := map[string]interface{}{
-			"address":   discovered.Address,
-			"asn":       discovered.ASN,
-			"disableMP": true,
-			"toAdvertise": map[string]interface{}{
-				"allowed": map[string]interface{}{
-					"mode":     "filtered",
-					"prefixes": allowedPrefixes,
-				},
+		neighbor := frrNeighborBase(config, discovered)
+		neighbor["toAdvertise"] = map[string]interface{}{
+			"allowed": map[string]interface{}{
+				"mode":     "filtered",
+				"prefixes": allowedPrefixes,
 			},
-		}
-		if discovered.EBGPMultiHop {
-			neighbor["ebgpMultiHop"] = true
-		}
-		if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
-			neighbor["bfdProfile"] = DefaultBFDProfileName
 		}
 		neighborValues = append(neighborValues, neighbor)
 	}
@@ -376,9 +366,7 @@ func ensureVMHostRouteConfiguration(ctx context.Context, c client.Client, routin
 		}},
 	}
 	if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
-		bgp["bfdProfiles"] = []interface{}{map[string]interface{}{
-			"name": DefaultBFDProfileName, "receiveInterval": int64(300), "transmitInterval": int64(300), "detectMultiplier": int64(3),
-		}}
+		bgp["bfdProfiles"] = []interface{}{frrBFDProfile()}
 	}
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "frrk8s.metallb.io/v1beta1",

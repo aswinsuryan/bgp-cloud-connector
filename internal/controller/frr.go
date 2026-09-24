@@ -93,6 +93,32 @@ func peerGroupsFromSpec(config *networkingapi.BGPCloudConfiguration) []platform.
 	return groups
 }
 
+// frrNeighborBase keeps peer identity and session settings identical across
+// shared and VM host-route FRRConfigurations that frr-k8s merges.
+func frrNeighborBase(config *networkingapi.BGPCloudConfiguration, neighbor platform.DiscoveredNeighbor) map[string]interface{} {
+	fields := map[string]interface{}{
+		"address":   neighbor.Address,
+		"asn":       neighbor.ASN,
+		"disableMP": true,
+	}
+	if neighbor.EBGPMultiHop {
+		fields["ebgpMultiHop"] = true
+	}
+	if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
+		fields["bfdProfile"] = DefaultBFDProfileName
+	}
+	return fields
+}
+
+func frrBFDProfile() map[string]interface{} {
+	return map[string]interface{}{
+		"name":             DefaultBFDProfileName,
+		"receiveInterval":  int64(300),
+		"transmitInterval": int64(300),
+		"detectMultiplier": int64(3),
+	}
+}
+
 // EnsureFRRConfigurationsFromGroups writes one FRRConfiguration per peer group
 // and prunes any managed configuration the groups no longer account for.
 //
@@ -145,23 +171,11 @@ func ensureSingleFRRConfiguration(
 
 	neighbors := make([]interface{}, 0, len(group.Neighbors))
 	for _, n := range group.Neighbors {
-		neighbor := map[string]interface{}{
-			"address":   n.Address,
-			"asn":       n.ASN,
-			"disableMP": true,
-			"toReceive": map[string]interface{}{
-				"allowed": map[string]interface{}{
-					"mode": "all",
-				},
+		neighbor := frrNeighborBase(config, n)
+		neighbor["toReceive"] = map[string]interface{}{
+			"allowed": map[string]interface{}{
+				"mode": "all",
 			},
-		}
-		// Omitted rather than written false: a neighbour on the node's link
-		// carries no such field.
-		if n.EBGPMultiHop {
-			neighbor["ebgpMultiHop"] = true
-		}
-		if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
-			neighbor["bfdProfile"] = DefaultBFDProfileName
 		}
 		neighbors = append(neighbors, neighbor)
 	}
@@ -176,14 +190,7 @@ func ensureSingleFRRConfiguration(
 	}
 
 	if config.Spec.BGP.LivenessDetection == networkingapi.LivenessDetectionBFD {
-		bgpSpec["bfdProfiles"] = []interface{}{
-			map[string]interface{}{
-				"name":             DefaultBFDProfileName,
-				"receiveInterval":  int64(300),
-				"transmitInterval": int64(300),
-				"detectMultiplier": int64(3),
-			},
-		}
+		bgpSpec["bfdProfiles"] = []interface{}{frrBFDProfile()}
 	}
 
 	obj := &unstructured.Unstructured{
