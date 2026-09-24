@@ -17,9 +17,11 @@ limitations under the License.
 package controller
 
 import (
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 // The operator reads exactly one secret and is granted get on exactly
@@ -50,4 +52,26 @@ func TestClientOptions_DoesNotCachePods(t *testing.T) {
 		}
 	}
 	t.Errorf("pods are still cached: DisableFor is %v", cacheOpts.DisableFor)
+}
+
+func TestClientOptions_CachesEverythingElse(t *testing.T) {
+	disabled := ClientOptions().Cache.DisableFor
+	if len(disabled) != 2 || reflect.TypeOf(disabled[0]) != reflect.TypeOf(&corev1.Secret{}) ||
+		reflect.TypeOf(disabled[1]) != reflect.TypeOf(&corev1.Pod{}) {
+		t.Fatalf("DisableFor = %v, want only Secret and Pod", disabled)
+	}
+}
+
+func TestCacheOptions_OnlyWatchesVirtLauncherPods(t *testing.T) {
+	byObject := CacheOptions().ByObject
+	if len(byObject) != 1 {
+		t.Fatalf("ByObject has %d entries, want only Pod", len(byObject))
+	}
+	for object, options := range byObject {
+		if _, ok := object.(*corev1.Pod); !ok || options.Label == nil ||
+			!options.Label.Matches(labels.Set{"kubevirt.io": "virt-launcher"}) ||
+			options.Label.Matches(labels.Set{"app": "unrelated"}) {
+			t.Fatalf("Pod cache selector = %v for %T", options.Label, object)
+		}
+	}
 }
