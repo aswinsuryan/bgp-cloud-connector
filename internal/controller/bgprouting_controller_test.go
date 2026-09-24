@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -277,6 +278,227 @@ func TestMapWorkloadToRoutingSelectsOnlyNamespaceNetwork(t *testing.T) {
 	}
 }
 
+func TestNamespaceRemovalWithdrawsVMHostRoutes(t *testing.T) {
+	ctx := context.Background()
+	routing := newTestBGPRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyBGPCloudConfiguration()
+	config.Spec.BGP.PeerGroups[0].NodeSelector = nil
+	namespace := testVMNamespace()
+	node := testRouterNode("worker-a", "a")
+	vmi := testVMI(namespace.Name, "vm", node.Name, "10.100.0.4")
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config, namespace, node, vmi).
+		WithStatusSubresource(routing, config).Build()
+	r := &BGPRoutingReconciler{Client: c, Scheme: s}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(routing)}
+	if _, err := r.Reconcile(ctx, request); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	routes := &unstructured.UnstructuredList{}
+	routes.SetGroupVersionKind(FRRConfigurationGVK.GroupVersion().WithKind("FRRConfigurationList"))
+	if err := c.List(ctx, routes, client.InNamespace(FRRNamespace), client.MatchingLabels{LabelManagedBy: LabelManagedByVMHostRoutes}); err != nil {
+		t.Fatalf("list VM host routes: %v", err)
+	}
+	if len(routes.Items) != 1 {
+		t.Fatalf("VM host-route FRRConfigurations = %d, want 1", len(routes.Items))
+	}
+
+	// Route withdrawal must not depend on BGPCloudConfiguration readiness.
+	config.Status.Phase = networkingapi.PhasePending
+	if err := c.Status().Update(ctx, config); err != nil {
+		t.Fatalf("mark BGPCloudConfiguration pending: %v", err)
+	}
+	if err := c.Delete(ctx, namespace); err != nil {
+		t.Fatalf("delete namespace: %v", err)
+	}
+	requests := r.mapNamespaceToRouting(ctx, namespace)
+	if len(requests) != 1 || requests[0] != request {
+		t.Fatalf("namespace delete requests = %v, want %v", requests, request)
+	}
+	result, err := r.Reconcile(ctx, requests[0])
+	if err != nil {
+		t.Fatalf("reconcile after namespace deletion: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("requeue = %v, want 30s", result.RequeueAfter)
+	}
+	if err := c.List(ctx, routes, client.InNamespace(FRRNamespace), client.MatchingLabels{LabelManagedBy: LabelManagedByVMHostRoutes}); err != nil {
+		t.Fatalf("list VM host routes after deletion: %v", err)
+	}
+	if len(routes.Items) != 0 {
+		t.Fatalf("VM host-route FRRConfigurations after namespace deletion = %d, want 0", len(routes.Items))
+	}
+	updated := &networkingapi.BGPRouting{}
+	if err := c.Get(ctx, request.NamespacedName, updated); err != nil {
+		t.Fatalf("get BGPRouting: %v", err)
+	}
+	if updated.Status.Phase != networkingapi.PhaseDegraded {
+		t.Fatalf("phase = %s, want Degraded", updated.Status.Phase)
+	}
+	networkCondition := meta.FindStatusCondition(updated.Status.Conditions, networkingapi.ConditionNetworkCreated)
+	if networkCondition == nil || networkCondition.Reason != ReasonNamespaceNotReady {
+		t.Fatalf("network condition = %#v, want %s", networkCondition, ReasonNamespaceNotReady)
+	}
+	routeCondition := meta.FindStatusCondition(updated.Status.Conditions, networkingapi.ConditionVMHostRoutesConfigured)
+	if routeCondition == nil || routeCondition.Status != metav1.ConditionTrue || routeCondition.Reason != ReasonReconciled ||
+		routeCondition.Message != "Configured 0 VM host routes" {
+		t.Fatalf("VM host-route condition = %#v, want True/%s with zero routes", routeCondition, ReasonReconciled)
+	}
+}
+
+func TestNamespaceLabelChangePredicate(t *testing.T) {
+	old := testVMNamespace()
+	newNamespace := old.DeepCopy()
+	newNamespace.Labels["unrelated"] = "changed"
+	pred := namespaceLabelChangePredicate()
+	if pred.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: newNamespace}) {
+		t.Fatal("unrelated label change triggered reconciliation")
+	}
+	delete(newNamespace.Labels, LabelPrimaryUDN)
+	if !pred.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: newNamespace}) {
+		t.Fatal("removing the empty primary network label did not trigger reconciliation")
+	}
+}
+
+func TestNamespaceListErrorPreservesVMHostRoutes(t *testing.T) {
+	ctx := context.Background()
+	routing := newTestBGPRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyBGPCloudConfiguration()
+	stale := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "existing-route", "namespace": FRRNamespace,
+			"labels":      map[string]interface{}{LabelManagedBy: LabelManagedByVMHostRoutes},
+			"annotations": map[string]interface{}{AnnotationBGPRouting: routing.Name},
+		},
+	}}
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config, stale).
+		WithStatusSubresource(routing, config).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.NamespaceList); ok {
+					return errors.New("namespace API unavailable")
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		}).Build()
+	r := &BGPRoutingReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(routing)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(stale), got); err != nil {
+		t.Fatalf("VM host route removed on namespace list error: %v", err)
+	}
+}
+
+func TestWorkloadWatchObjectBeforeAndAfterKubeVirtInstall(t *testing.T) {
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{VirtualMachineInstanceGVK.GroupVersion()})
+	withoutKubeVirt, err := workloadWatchObject(mapper)
+	if err != nil {
+		t.Fatalf("choose fallback watch: %v", err)
+	}
+	if _, ok := withoutKubeVirt.(*corev1.Pod); !ok {
+		t.Fatalf("watch without KubeVirt = %T, want Pod", withoutKubeVirt)
+	}
+	mapper.AddSpecific(VirtualMachineInstanceGVK,
+		VirtualMachineInstanceGVK.GroupVersion().WithResource("virtualmachineinstances"),
+		VirtualMachineInstanceGVK.GroupVersion().WithResource("virtualmachineinstance"), meta.RESTScopeNamespace)
+	withKubeVirt, err := workloadWatchObject(mapper)
+	if err != nil {
+		t.Fatalf("choose VMI watch: %v", err)
+	}
+	if _, ok := withKubeVirt.(*unstructured.Unstructured); !ok || withKubeVirt.GetObjectKind().GroupVersionKind() != VirtualMachineInstanceGVK {
+		t.Fatalf("watch with KubeVirt = %T %s, want VMI", withKubeVirt, withKubeVirt.GetObjectKind().GroupVersionKind())
+	}
+}
+
+func TestRoutingReconcile_VMIAPILossKeepsNetworkReady(t *testing.T) {
+	routing := newTestBGPRouting()
+	routing.Finalizers = []string{RoutingFinalizerName}
+	config := newReadyBGPCloudConfiguration()
+	stale := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "existing-route", "namespace": FRRNamespace,
+			"labels":      map[string]interface{}{LabelManagedBy: LabelManagedByVMHostRoutes},
+			"annotations": map[string]interface{}{AnnotationBGPRouting: routing.Name},
+		},
+	}}
+	noMatch := &meta.NoKindMatchError{GroupKind: VirtualMachineInstanceGVK.GroupKind(),
+		SearchedVersions: []string{VirtualMachineInstanceGVK.Version}}
+	s := routingTestScheme()
+	c := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(routing, config, testVMNamespace(), stale).
+		WithStatusSubresource(routing, config).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if list.GetObjectKind().GroupVersionKind() == VirtualMachineInstanceGVK.GroupVersion().WithKind("VirtualMachineInstanceList") {
+					return noMatch
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		}).Build()
+	r := &BGPRoutingReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: routing.Name}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	updated := &networkingapi.BGPRouting{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(routing), updated); err != nil {
+		t.Fatalf("get BGPRouting: %v", err)
+	}
+	if updated.Status.Phase != networkingapi.PhaseReady {
+		t.Fatalf("phase = %s, want Ready", updated.Status.Phase)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, networkingapi.ConditionVMHostRoutesConfigured)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "VMIAPIUnavailable" {
+		t.Fatalf("VM host-route condition = %#v, want False/VMIAPIUnavailable", condition)
+	}
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), got); err != nil {
+		t.Fatalf("existing route was removed: %v", err)
+	}
+}
+
+func TestVMIRouteChangePredicate(t *testing.T) {
+	base := testVMI("vms", "vm", "worker-a", "10.100.0.4")
+	pred := vmiRouteChangePredicate()
+	tests := []struct {
+		name string
+		edit func(*unstructured.Unstructured)
+		want bool
+	}{
+		{"unrelated condition", func(vmi *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(vmi.Object, "Ready", "status", "conditions")
+		}, false},
+		{"address", func(vmi *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(vmi.Object, []interface{}{map[string]interface{}{"ipAddress": "10.100.0.5"}}, "status", "interfaces")
+		}, true},
+		{"node move", func(vmi *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(vmi.Object, "worker-b", "status", "nodeName")
+		}, true},
+		{"phase", func(vmi *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(vmi.Object, "Succeeded", "status", "phase")
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			updated := base.DeepCopy()
+			tt.edit(updated)
+			if got := pred.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: updated}); got != tt.want {
+				t.Fatalf("predicate = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRoutingReconcile_RepeatedReconcile_DoesNotRewriteSharedRouteAdvertisements(t *testing.T) {
 	config := newReadyBGPCloudConfiguration()
 	routingProd := newTestBGPRouting()
@@ -474,10 +696,19 @@ func TestRoutingReconcile_DuplicateNetworkName(t *testing.T) {
 	duplicate := newTestBGPRouting()
 	duplicate.Finalizers = []string{RoutingFinalizerName}
 	config := newReadyBGPCloudConfiguration()
+	namespace := testVMNamespace()
+	stale := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1", "kind": "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name": "existing-route", "namespace": FRRNamespace,
+			"labels":      map[string]interface{}{LabelManagedBy: LabelManagedByVMHostRoutes},
+			"annotations": map[string]interface{}{AnnotationBGPRouting: duplicate.Name},
+		},
+	}}
 
 	s := routingTestScheme()
 	c := fake.NewClientBuilder().WithScheme(s).
-		WithObjects(existing, duplicate, config).
+		WithObjects(existing, duplicate, config, namespace, stale).
 		WithStatusSubresource(existing, duplicate, config).
 		Build()
 
@@ -499,6 +730,16 @@ func TestRoutingReconcile_DuplicateNetworkName(t *testing.T) {
 	}
 	if updated.Status.Phase != networkingapi.PhaseDegraded {
 		t.Errorf("expected Degraded, got %s", updated.Status.Phase)
+	}
+	routeCondition := meta.FindStatusCondition(updated.Status.Conditions, networkingapi.ConditionVMHostRoutesConfigured)
+	if routeCondition == nil || routeCondition.Status != metav1.ConditionTrue ||
+		routeCondition.Message != "Configured 0 VM host routes" {
+		t.Errorf("VM host-route condition = %#v, want zero configured routes", routeCondition)
+	}
+	gotRoute := &unstructured.Unstructured{}
+	gotRoute.SetGroupVersionKind(FRRConfigurationGVK)
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(stale), gotRoute); !apierrors.IsNotFound(err) {
+		t.Errorf("stale VM host route survived DuplicateNetwork pre-check: %v", err)
 	}
 }
 
