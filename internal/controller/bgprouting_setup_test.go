@@ -153,6 +153,8 @@ func (i *setupTestInformer) AddEventHandlerWithOptions(handler toolscache.Resour
 	return setupTestRegistration{}, nil
 }
 
-type setupTestRegistration struct{}
+type setupTestRegistration struct {
+	toolscache.ResourceEventHandlerRegistration
+}
 
 func (setupTestRegistration) HasSynced() bool { return true }
